@@ -83,10 +83,33 @@ impl EntityCollection {
                 let jaccard = entity1.jaccard_similarity(entity2);
 
                 let mut comparison = HashMap::new();
-                comparison.insert("entity_index".to_string(), i.to_object(py));
-                comparison.insert("process1".to_string(), self.process_name.to_object(py));
-                comparison.insert("process2".to_string(), other.process_name.to_object(py));
-                comparison.insert("jaccard".to_string(), jaccard.to_object(py));
+                comparison.insert(
+                    "entity_index".to_string(),
+                    i.into_pyobject(py).unwrap().into_any().unbind(),
+                );
+                comparison.insert(
+                    "process1".to_string(),
+                    self.process_name
+                        .clone()
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any()
+                        .unbind(),
+                );
+                comparison.insert(
+                    "process2".to_string(),
+                    other
+                        .process_name
+                        .clone()
+                        .into_pyobject(py)
+                        .unwrap()
+                        .into_any()
+                        .unbind(),
+                );
+                comparison.insert(
+                    "jaccard".to_string(),
+                    jaccard.into_pyobject(py).unwrap().into_any().unbind(),
+                );
 
                 comparisons.push(comparison);
             }
