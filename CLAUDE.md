@@ -11,7 +11,7 @@ EntityFrame is a hybrid Python/Rust package for comparing entity resolutions fro
 EntityFrame implements a three-layer architecture for high-performance entity evaluation:
 
 1. **String Interning (Layer 1)**: Global string pool mapping record IDs to compact integers
-2. **Roaring Bitmaps (Layer 2)**: Compressed bitmap sets optimized for set operations
+2. **Roaring Bitmaps (Layer 2)**: Compressed bitmap sets optimised for set operations
 3. **Entity Hashing (Layer 3)**: Deterministic hashing for fast entity identity and caching
 
 ### Key Components
@@ -23,13 +23,13 @@ EntityFrame implements a three-layer architecture for high-performance entity ev
 ### Performance Focus
 
 All core operations are implemented in Rust for maximum performance:
-- Set operations use SIMD-optimized roaring bitmaps
+- Set operations use SIMD-optimised roaring bitmaps
 - String interning reduces memory usage by 10-100x
 - Integer-based operations provide excellent cache locality
 
 ## Architecture
 
-The project follows UV's proven structure with symmetrical organization under `src/`:
+The project follows UV's proven structure with symmetrical organisation under `src/`:
 
 ```
 src/

@@ -1,24 +1,25 @@
-# EntityFrame: The Universal Entity Resolution Evaluation Engine
-
-EntityFrame revolutionizes how we evaluate entity resolution methods by treating entities as what they truly are: **collections of records across multiple datasets**, not just pairs of records.
+🍏 EntityFrame rethinks how we evaluate entity resolution methods by treating entities as what they truly are: **collections of records across multiple datasets**, not just pairs of records.
 
 ## The Problem
 
-Current entity resolution evaluation is fundamentally broken. When comparing tools like Splink vs RecordLinkage vs Dedupe, we're forced into a lossy abstraction where entities become mere pairs of records. But **entities aren't pairs - they're sets of sets**.
+When comparing tools like Splink vs RecordLinkage vs Dedupe, we're forced into a lossy abstraction where entities become mere pairs of records. But **entities aren't pairs - they're sets of sets**.
 
 The question isn't "do these two records match?" but rather "how well do these two methods agree on what constitutes the entity 'Michael'?"
 
 ## The Solution
 
-EntityFrame provides a **three-layer architecture** optimized for entity-centric evaluation at scale:
+EntityFrame provides a **three-layer architecture** optimised for entity-centric evaluation at scale:
 
 ### Layer 1: String Interning
+
 Every unique record ID gets mapped to a compact integer exactly once, creating a global string pool that enables massive memory savings and faster comparisons.
 
-### Layer 2: Roaring Bitmaps  
-Record ID sets become compressed bitmaps optimized for the set operations that drive entity resolution evaluation. Perfect for the sparse/clustered patterns typical in entity data.
+### Layer 2: Roaring Bitmaps
+
+Record ID sets become compressed bitmaps optimised for the set operations that drive entity resolution evaluation. Perfect for the sparse/clustered patterns typical in entity data.
 
 ### Layer 3: Entity Hashing
+
 Each entity gets a deterministic hash based on its complete set-of-sets structure, enabling fast deduplication, lookup, and caching.
 
 ## Core Concepts
@@ -71,7 +72,7 @@ just build
 
 EntityFrame is built for scale:
 - **Memory efficiency**: 10-100x smaller than naive string sets
-- **Speed**: Set operations use SIMD-optimized roaring bitmaps
+- **Speed**: Set operations use SIMD-optimised roaring bitmaps
 - **Cache friendly**: Integer operations with excellent locality
 
 Evaluate millions of entities across multiple methods in minutes, not hours.
@@ -112,7 +113,6 @@ just check       # Format and lint all code
 
 Licensed under either of
 
-- Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
 - MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
 
 at your option.
