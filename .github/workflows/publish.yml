@@ -79,6 +79,7 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: updated-configs
+        path: updated-configs
     
     - name: Move updated configs to correct locations
       shell: bash
@@ -111,6 +112,7 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: updated-configs
+        path: updated-configs
     
     - name: Move updated configs to correct locations
       run: |
