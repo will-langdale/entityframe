@@ -2,7 +2,7 @@
 
 ## The Problem
 
-When comparing tools like Splink vs RecordLinkage vs Dedupe, we're forced into a lossy abstraction where entities become mere pairs of records. But **entities aren't pairs - they're sets of sets**.
+When comparing entity resolution tools, we're forced into a lossy abstraction where entities become mere pairs of records. But **entities aren't pairs - they're sets of sets**.
 
 The question isn't "do these two records match?" but rather "how well do these two methods agree on what constitutes the entity 'Michael'?"
 
@@ -18,9 +18,10 @@ Every unique record ID gets mapped to a compact integer exactly once, creating a
 
 Record ID sets become compressed bitmaps optimised for the set operations that drive entity resolution evaluation. Perfect for the sparse/clustered patterns typical in entity data.
 
-### Layer 3: Entity Hashing
+### Layer 3: Entity Collections & Frames
 
-Each entity gets a deterministic hash based on its complete set-of-sets structure, enabling fast deduplication, lookup, and caching.
+**EntityCollection** (like pandas Series): Contains entities from a single process
+**EntityFrame** (like pandas DataFrame): Contains multiple collections with shared string interning
 
 ## Core Concepts
 
@@ -38,21 +39,132 @@ Entity resolution evaluation becomes **pure set theory**: comparing how differen
 
 ## Quick Start
 
+### Option 1: Manual Collection Building (Composable)
+
 ```python
 import entityframe as ef
 
-# Create entities from your resolution results
-entities = ef.EntityCollection()
+# Create frame with shared string interning
+frame = ef.EntityFrame()
 
-# Add entities from different methods
-entities.add_method("splink", splink_results)
-entities.add_method("recordlinkage", recordlinkage_results)
+# Build collections separately
+model1_collection = ef.EntityCollection("model_1_output")
+model1_collection.add_entities(model1_results, frame.interner)
 
-# Compare methods at entity level
-comparison = entities.compare_methods("splink", "recordlinkage")
+model2_collection = ef.EntityCollection("model_2_output") 
+model2_collection.add_entities(model2_results, frame.interner)
+
+# Add to frame
+frame.add_collection("model_1", model1_collection)
+frame.add_collection("model_2", model2_collection)
+
+# Compare entity resolution methods
+comparison = frame.compare_collections("model_1", "model_2")
+print(f"Average Jaccard similarity: {sum(c['jaccard'] for c in comparison) / len(comparison)}")
+```
+
+### Option 2: Convenience Methods
+
+```python
+import entityframe as ef
+
+# Create frame and add methods directly
+frame = ef.EntityFrame()
+frame.add_method("model_1_output", model1_results)
+frame.add_method("model_2_output", model2_results)
+
+# Compare methods (legacy API, maps to compare_collections)
+comparison = frame.compare_methods("model_1_output", "model_2_output")
 
 # Find high-disagreement cases for debugging
-problematic = comparison.filter(jaccard < 0.5)
+low_agreement = [c for c in comparison if c['jaccard'] < 0.5]
+print(f"Found {len(low_agreement)} entities with low agreement")
+```
+
+### Data Format
+
+Your entity data should be structured as:
+
+```python
+model_results = [
+    {
+        "customers": ["cust_001", "cust_002"],      # Records in customers dataset
+        "transactions": ["txn_100", "txn_101"],    # Records in transactions dataset
+    },
+    {
+        "customers": ["cust_003"],
+        "transactions": ["txn_102", "txn_103", "txn_104"],
+        "addresses": ["addr_001"]                   # Can include different datasets
+    }
+    # ... more entities
+]
+```
+
+## API Reference
+
+### EntityFrame (like pandas DataFrame)
+
+The main container that holds multiple entity collections with shared string interning.
+
+```python
+frame = ef.EntityFrame()
+
+# Add collections
+frame.add_method("model_a", entity_data)           # Convenience method
+frame.add_collection("model_b", collection)       # Manual addition
+
+# Access collections
+collection = frame.get_collection("model_a")
+names = frame.get_collection_names()
+
+# Compare entity resolution methods
+comparisons = frame.compare_collections("model_a", "model_b")
+
+# Statistics
+frame.collection_count()    # Number of methods/collections
+frame.total_entities()      # Total entities across all collections  
+frame.interner_size()       # Number of unique strings interned
+```
+
+### EntityCollection (like pandas Series)
+
+Contains entities from a single entity resolution process.
+
+```python
+collection = ef.EntityCollection("model_output")
+
+# Add entities using shared interner
+collection.add_entities(entity_data, shared_interner)
+
+# Access entities
+entity = collection.get_entity(0)       # Get by index
+entities = collection.get_entities()    # Get all entities
+collection.len()                        # Number of entities
+collection.total_records()              # Total records across all entities
+
+# Compare with another collection
+similarities = collection.compare_with(other_collection)
+```
+
+### Entity
+
+Individual entity containing record IDs across multiple datasets.
+
+```python
+entity = ef.Entity()
+
+# Add records  
+entity.add_record("customers", record_id)
+entity.add_records("transactions", [id1, id2, id3])
+
+# Query entity
+records = entity.get_records("customers")
+datasets = entity.get_datasets()
+entity.total_records()
+entity.has_dataset("customers")
+
+# Compare entities
+similarity = entity1.jaccard_similarity(entity2)
 ```
 
 ## Installation
@@ -71,24 +183,76 @@ just build
 ## Performance
 
 EntityFrame is built for scale:
-- **Memory efficiency**: 10-100x smaller than naive string sets
+- **Memory efficiency**: 10-100x smaller than naive string sets through string interning
 - **Speed**: Set operations use SIMD-optimised roaring bitmaps
 - **Cache friendly**: Integer operations with excellent locality
+- **Shared interning**: Multiple collections share the same string pool
 
 Evaluate millions of entities across multiple methods in minutes, not hours.
 
 ## Architecture
 
-EntityFrame is a hybrid Python/Rust package using PyO3 bindings:
+EntityFrame follows a **pandas-like design pattern**:
+
+- **EntityCollection** ≈ pandas Series (single process results) 
+- **EntityFrame** ≈ pandas DataFrame (multiple process comparison)
+
+Built as a hybrid Python/Rust package using PyO3 bindings:
 
 ```
 src/
 ├── python/entityframe/    # Python API with DataFrame-like interface
 ├── rust/entityframe/      # High-performance core in Rust
-└── tests/                # Comprehensive test suite
+└── tests/                # Comprehensive test suite (36 tests)
 ```
 
-The Rust core handles the computationally intensive operations while Python provides a familiar, DataFrame-like API that data scientists already understand.
+The Rust core handles computationally intensive operations while Python provides a familiar, DataFrame-like API.
+
+## Example: Comparing Entity Resolution Methods
+
+```python
+import entityframe as ef
+
+# Sample output from two different entity resolution models
+model_1_results = [
+    {
+        "customers": ["cust_001", "cust_002"],
+        "transactions": ["txn_100"],
+    },
+    {
+        "customers": ["cust_003"],
+        "transactions": ["txn_101", "txn_102"],
+    }
+]
+
+model_2_results = [
+    {
+        "customers": ["cust_001", "cust_002", "cust_003"],  # Different clustering
+        "transactions": ["txn_100", "txn_101"],
+    },
+    {
+        "transactions": ["txn_102"],
+    }
+]
+
+# Compare the models
+frame = ef.EntityFrame()
+frame.add_method("model_1_output", model_1_results)
+frame.add_method("model_2_output", model_2_results)
+
+print(f"Model 1 has {len(frame.get_collection('model_1_output').get_entities())} entities")
+print(f"Model 2 has {len(frame.get_collection('model_2_output').get_entities())} entities")
+print(f"Shared interner contains {frame.interner_size()} unique strings")
+
+# Compare entity resolution quality
+comparisons = frame.compare_collections("model_1_output", "model_2_output")
+avg_jaccard = sum(c['jaccard'] for c in comparisons) / len(comparisons)
+print(f"Average Jaccard similarity: {avg_jaccard:.3f}")
+
+# Find entities with low agreement
+low_agreement = [c for c in comparisons if c['jaccard'] < 0.8]
+print(f"Entities with <80% agreement: {len(low_agreement)}")
+```
 
 ## Development
 
