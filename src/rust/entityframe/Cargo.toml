@@ -1,0 +1,11 @@
+[package]
+name = "entityframe"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "entityframe"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
