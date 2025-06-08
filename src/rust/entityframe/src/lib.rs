@@ -149,16 +149,9 @@ impl Entity {
     }
 }
 
-/// Return a hello message from Rust.
-#[pyfunction]
-fn hello_rust() -> PyResult<String> {
-    Ok("Hello from Rust!".to_string())
-}
-
 /// A Python module implemented in Rust.
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(hello_rust, m)?)?;
     m.add_class::<StringInterner>()?;
     m.add_class::<Entity>()?;
     Ok(())
