@@ -6,6 +6,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 EntityFrame is a hybrid Python/Rust package for comparing entity resolutions from different processes. The project uses PyO3 bindings to combine Python's ease of use with Rust's performance for computationally intensive operations.
 
+### Core Architecture
+
+EntityFrame implements a three-layer architecture for high-performance entity evaluation:
+
+1. **String Interning (Layer 1)**: Global string pool mapping record IDs to compact integers
+2. **Roaring Bitmaps (Layer 2)**: Compressed bitmap sets optimized for set operations
+3. **Entity Hashing (Layer 3)**: Deterministic hashing for fast entity identity and caching
+
+### Key Components
+
+- **StringInterner**: Maps string record IDs to integers for memory efficiency
+- **Entity**: Core entity object containing dataset->record_id mappings using roaring bitmaps
+- **EntityCollection**: High-level API for managing and comparing multiple entity resolution methods
+
+### Performance Focus
+
+All core operations are implemented in Rust for maximum performance:
+- Set operations use SIMD-optimized roaring bitmaps
+- String interning reduces memory usage by 10-100x
+- Integer-based operations provide excellent cache locality
+
 ## Architecture
 
 The project follows UV's proven structure with symmetrical organization under `src/`:
