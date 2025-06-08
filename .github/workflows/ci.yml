@@ -23,6 +23,12 @@ jobs:
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
     
+    - name: Set PyO3 environment
+      run: |
+        PYTHON_PATH=$(uv run which python)
+        echo "PYO3_PYTHON=${PYTHON_PATH}" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$(dirname ${PYTHON_PATH})/../lib" >> $GITHUB_ENV
+    
     - name: Install just
       uses: extractions/setup-just@v2
     
@@ -49,6 +55,11 @@ jobs:
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
     
+    - name: Set PyO3 environment
+      run: |
+        PYTHON_PATH=$(uv run which python)
+        echo "PYO3_PYTHON=${PYTHON_PATH}" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$(dirname ${PYTHON_PATH})/../lib" >> $GITHUB_ENV
     
     - name: Install just
       uses: extractions/setup-just@v2
