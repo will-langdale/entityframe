@@ -43,38 +43,14 @@ jobs:
         path: src/rust/entityframe/Cargo.toml
 
   build-wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     needs: update-version
+    environment: release
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Linux
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: i686-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: armv7-unknown-linux-gnueabihf
-          - os: ubuntu-latest
-            target: s390x-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: ppc64le-unknown-linux-gnu
-          # Windows
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - os: windows-latest
-            target: i686-pc-windows-msvc
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-          # macOS
-          - os: macos-latest
-            target: x86_64-apple-darwin
-          - os: macos-latest
-            target: aarch64-apple-darwin
-    
-    runs-on: ${{ matrix.os }}
+        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
     
     steps:
     - uses: actions/checkout@v4
@@ -94,28 +70,31 @@ jobs:
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v5
       with:
-        python-version: '3.x'
+        python-version: '3.13'
     
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
-      with:
-        target: ${{ matrix.target }}
     
-    - name: Install maturin
-      run: uv tool install maturin
+    - name: Install cibuildwheel
+      run: uv tool install cibuildwheel
     
     - name: Build wheels
-      run: uv tool run maturin build --release --target ${{ matrix.target }} --out dist
+      run: uv tool run cibuildwheel --output-dir wheelhouse
     
-    - name: Upload wheels
-      uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v4
       with:
-        name: wheels-${{ matrix.target }}
-        path: dist
+        path: ./wheelhouse/*.whl
+        name: wheel-builds-${{ matrix.os }}
 
-  build-sdist:
-    needs: update-version
+  build-exotic-wheels:
+    name: Build wheels on exotic architectures
     runs-on: ubuntu-latest
+    needs: update-version
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ppc64le, s390x, aarch64]
     
     steps:
     - uses: actions/checkout@v4
@@ -135,7 +114,55 @@ jobs:
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v5
       with:
-        python-version: '3.x'
+        python-version: '3.10'
+    
+    - name: Set up Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+    
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: all
+    
+    - name: Install cibuildwheel
+      run: uv tool install cibuildwheel
+    
+    - name: Build wheels
+      run: uv tool run cibuildwheel --output-dir wheelhouse
+      env:
+        CIBW_ARCHS_LINUX: ${{ matrix.arch }}
+        CIBW_SKIP: cp36-* cp37-* cp38-* pp* *musl*
+    
+    - uses: actions/upload-artifact@v4
+      with:
+        path: ./wheelhouse/*.whl
+        name: wheel-builds-${{ matrix.arch }}
+
+  build-sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    needs: update-version
+    environment: release
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download pyproject.toml
+      uses: actions/download-artifact@v4
+      with:
+        name: pyproject
+        path: .
+    
+    - name: Download Cargo.toml
+      uses: actions/download-artifact@v4
+      with:
+        name: cargo-toml
+        path: src/rust/entityframe/
+    
+    - name: Install uv and Python
+      uses: astral-sh/setup-uv@v5
+      with:
+        python-version: '3.10'
     
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -153,8 +180,9 @@ jobs:
         path: dist/*.tar.gz
 
   publish:
-    needs: [build-wheels, build-sdist]
+    name: Publish to PyPI
     runs-on: ubuntu-latest
+    needs: [build-wheels, build-exotic-wheels, build-sdist]
     environment: release
     permissions:
       id-token: write
@@ -163,7 +191,7 @@ jobs:
     - name: Download wheel artifacts
       uses: actions/download-artifact@v4
       with:
-        pattern: wheels-*
+        pattern: wheel-builds-*
         path: dist
         merge-multiple: true
     
