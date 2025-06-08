@@ -1,0 +1,24 @@
+[project]
+name = "entityframe"
+version = "0.1.0"
+description = "A Python package for comparing entity resolutions from different processes"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "src/python"
+module-name = "entityframe._rust"
+manifest-path = "src/rust/entityframe/Cargo.toml"
+
+[dependency-groups]
+dev = [
+    "maturin>=1.8.6",
+    "mypy>=1.16.0",
+    "pytest>=8.4.0",
+    "ruff>=0.11.13",
+]
