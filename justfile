@@ -10,17 +10,18 @@ build:
     uv run maturin develop
 
 # Run Python tests
-test:
+test-python:
     uv run pytest src/tests/
 
-# Run Rust tests (Note: PyO3 tests require Python context)
+# Run Rust tests (pure Rust unit tests + cargo check)
 test-rust:
-    @echo "Note: Rust tests with PyO3 require Python context, use 'just test' instead"
-    @echo "Running cargo check instead..."
+    @echo "Running Rust unit tests..."
+    cd src/rust/entityframe && cargo test --no-default-features
+    @echo "Running cargo check..."
     cd src/rust/entityframe && cargo check
 
-# Run all tests
-test-all: test test-rust
+# Run all tests (Python + Rust)
+test: test-python test-rust
 
 # Format and lint all code (Python + Rust)
 format:

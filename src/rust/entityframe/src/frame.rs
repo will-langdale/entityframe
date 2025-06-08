@@ -8,10 +8,10 @@ use crate::interner::StringInterner;
 #[pyclass]
 pub struct EntityFrame {
     collections: HashMap<String, EntityCollection>,
+    // Single interner for all strings (datasets and records)
     interner: StringInterner,
-    // Dataset name interning for massive memory savings
-    dataset_names: HashMap<u32, String>,      // ID -> name
-    dataset_name_to_id: HashMap<String, u32>, // name -> ID
+    // Dataset name tracking for API convenience
+    dataset_name_to_id: HashMap<String, u32>,
 }
 
 impl Default for EntityFrame {
@@ -27,7 +27,6 @@ impl EntityFrame {
         Self {
             collections: HashMap::new(),
             interner: StringInterner::new(),
-            dataset_names: HashMap::new(),
             dataset_name_to_id: HashMap::new(),
         }
     }
@@ -44,44 +43,39 @@ impl EntityFrame {
 
     /// Declare a dataset name upfront for efficient interning.
     pub fn declare_dataset(&mut self, dataset_name: &str) -> u32 {
-        if let Some(&existing_id) = self.dataset_name_to_id.get(dataset_name) {
-            return existing_id;
-        }
-
         let dataset_id = self.interner.intern(dataset_name);
-        self.dataset_names
-            .insert(dataset_id, dataset_name.to_string());
         self.dataset_name_to_id
             .insert(dataset_name.to_string(), dataset_id);
         dataset_id
     }
 
     /// Get dataset ID from name (internal method).
-    pub fn get_dataset_id(&self, dataset_name: &str) -> Option<u32> {
-        self.dataset_name_to_id.get(dataset_name).copied()
+    pub fn get_dataset_id(&mut self, dataset_name: &str) -> u32 {
+        if let Some(&existing_id) = self.dataset_name_to_id.get(dataset_name) {
+            existing_id
+        } else {
+            self.declare_dataset(dataset_name)
+        }
     }
 
     /// Get dataset name from ID (internal method).
-    pub fn get_dataset_name(&self, dataset_id: u32) -> Option<&String> {
-        self.dataset_names.get(&dataset_id)
+    pub fn get_dataset_name(&self, dataset_id: u32) -> PyResult<&str> {
+        self.interner.get_string(dataset_id)
     }
 
-    /// Get a mutable reference to the interner for adding entities
+    /// Get a reference to the shared interner
     #[getter]
     pub fn interner(&self) -> StringInterner {
         self.interner.clone()
     }
 
-    /// Add a collection to the frame, migrating its interner and dataset mappings
+    /// Create a new collection that will use this frame's shared interner
+    pub fn create_collection(&self, name: &str) -> EntityCollection {
+        EntityCollection::new(name)
+    }
+
+    /// Add a collection to the frame (simple - no ID remapping needed)
     pub fn add_collection(&mut self, name: &str, collection: EntityCollection) {
-        // Migrate collection's dataset mappings to frame's centralized system
-        for dataset_name in collection.dataset_name_to_id().keys() {
-            self.declare_dataset(dataset_name);
-        }
-
-        // TODO: Ideally, we'd update the collection's entities to use the frame's dataset IDs
-        // For now, assuming the collection's entities are already using consistent IDs
-
         self.collections.insert(name.to_string(), collection);
     }
 
@@ -91,20 +85,12 @@ impl EntityFrame {
         method_name: &str,
         entity_data: Vec<HashMap<String, Vec<String>>>,
     ) {
-        // Auto-declare any new datasets found in the data
-        for entity_dict in &entity_data {
-            for dataset_name in entity_dict.keys() {
-                self.declare_dataset(dataset_name);
-            }
-        }
-
-        // Use with_capacity to pre-allocate based on entity count
-        let mut collection =
-            EntityCollection::with_capacity(method_name.to_string(), entity_data.len());
-        collection.add_entities_with_datasets(
+        // Create a collection and add entities using frame's shared interner
+        let mut collection = self.create_collection(method_name);
+        collection.add_entities(
             entity_data,
             &mut self.interner,
-            &self.dataset_name_to_id,
+            &mut self.dataset_name_to_id,
         );
         self.collections.insert(method_name.to_string(), collection);
     }
@@ -162,7 +148,7 @@ impl EntityFrame {
 
     /// Get all declared dataset names
     pub fn get_dataset_names(&self) -> Vec<String> {
-        self.dataset_names.values().cloned().collect()
+        self.dataset_name_to_id.keys().cloned().collect()
     }
 
     /// Check if an entity in a collection has a dataset (with proper name resolution)
@@ -183,10 +169,121 @@ impl EntityFrame {
             PyErr::new::<pyo3::exceptions::PyIndexError, _>("Entity index out of range")
         })?;
 
+        // Look up dataset ID from name
         if let Some(&dataset_id) = self.dataset_name_to_id.get(dataset_name) {
             Ok(entity.has_dataset_id(dataset_id))
         } else {
+            // Dataset not found
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_entity_frame_creation() {
+        let frame = EntityFrame::new();
+        assert_eq!(frame.collection_count(), 0);
+        assert_eq!(frame.total_entities(), 0);
+        assert!(frame.get_collection_names().is_empty());
+        assert_eq!(frame.interner_size(), 0);
+    }
+
+    #[test]
+    fn test_single_interner_system_basic() {
+        let mut frame = EntityFrame::new();
+
+        // Test dataset declaration
+        let dataset_id1 = frame.declare_dataset("customers");
+        let dataset_id2 = frame.declare_dataset("orders");
+        let dataset_id3 = frame.declare_dataset("customers"); // Same as dataset_id1
+
+        assert_eq!(dataset_id1, 0);
+        assert_eq!(dataset_id2, 1);
+        assert_eq!(dataset_id3, 0); // Should be same as first
+        assert_eq!(frame.get_dataset_names().len(), 2);
+
+        // Test shared interner
+        let mut interner = frame.interner();
+        let record_id1 = interner.intern("rec1");
+        let record_id2 = interner.intern("rec2");
+        let record_id3 = interner.intern("rec1"); // Same as record_id1
+
+        assert_eq!(record_id1, 2); // After customers=0, orders=1
+        assert_eq!(record_id2, 3);
+        assert_eq!(record_id3, 2); // Should be same as first
+        assert_eq!(interner.len(), 4); // customers, orders, rec1, rec2
+    }
+
+    #[test]
+    fn test_entity_frame_add_collection() {
+        let mut frame = EntityFrame::new();
+        let collection = EntityCollection::new("splink");
+
+        frame.add_collection("splink", collection);
+
+        assert_eq!(frame.collection_count(), 1);
+        assert_eq!(frame.total_entities(), 0); // Empty collection
+        assert!(frame.get_collection_names().contains(&"splink".to_string()));
+
+        let retrieved_collection = frame.get_collection("splink").unwrap();
+        assert_eq!(retrieved_collection.len(), 0);
+        assert_eq!(retrieved_collection.process_name(), "splink");
+    }
+
+    #[test]
+    fn test_add_method_collections_different_record_ids() {
+        use std::collections::HashMap;
+
+        let mut frame = EntityFrame::new();
+
+        // Add two methods with different records using the simplified API
+        frame.add_method(
+            "coll1",
+            vec![{
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["rec1".to_string(), "rec2".to_string()],
+                );
+                data
+            }],
+        );
+
+        frame.add_method(
+            "coll2",
+            vec![{
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["rec3".to_string(), "rec4".to_string()],
+                );
+                data
+            }],
+        );
+
+        // Get entities and check they have different record IDs
+        let c1 = frame.get_collection("coll1").unwrap();
+        let c2 = frame.get_collection("coll2").unwrap();
+
+        let e1 = c1.get_entity(0).unwrap();
+        let e2 = c2.get_entity(0).unwrap();
+
+        let e1_records = e1.get_records_by_id(0);
+        let e2_records = e2.get_records_by_id(0);
+
+        println!("Entity 1 records: {:?}", e1_records);
+        println!("Entity 2 records: {:?}", e2_records);
+
+        // They should have different record IDs since they're different strings
+        assert_ne!(e1_records, e2_records);
+
+        // Jaccard should be 0.0 since no record overlap
+        let jaccard = e1.jaccard_similarity(&e2);
+        println!("Jaccard: {}", jaccard);
+        assert_eq!(jaccard, 0.0);
     }
 }

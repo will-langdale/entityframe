@@ -5,9 +5,6 @@ mod entity;
 mod frame;
 mod interner;
 
-#[cfg(test)]
-mod tests;
-
 pub use collection::EntityCollection;
 pub use entity::Entity;
 pub use frame::EntityFrame;

@@ -19,26 +19,19 @@ class TestEntityFrame:
         assert frame.interner_size() == 0
 
     def test_add_collection_manually(self):
-        """Test manually creating and adding a collection to the frame."""
+        """Test manually creating and adding an empty collection to the frame."""
         frame = EntityFrame()
         collection = EntityCollection("splink")
-        interner = frame.interner  # Get the frame's interner
 
-        entity_data = [
-            {"customers": ["cust_001", "cust_002"]},
-            {"customers": ["cust_003"]},
-        ]
-
-        interner = collection.add_entities(entity_data, interner)
         frame.add_collection("splink", collection)
 
         assert frame.collection_count() == 1
-        assert frame.total_entities() == 2
+        assert frame.total_entities() == 0  # Empty collection
         assert "splink" in frame.get_collection_names()
 
         retrieved_collection = frame.get_collection("splink")
         assert retrieved_collection is not None
-        assert retrieved_collection.len() == 2
+        assert retrieved_collection.len() == 0
         assert retrieved_collection.process_name == "splink"
 
     def test_add_method_convenience(self):
@@ -60,9 +53,8 @@ class TestEntityFrame:
 
         assert frame.collection_count() == 1
         assert frame.total_entities() == 2
-        assert (
-            frame.interner_size() == 8
-        )  # cust_001, cust_002, cust_003, txn_100, txn_101, txn_102 + "customers" + "transactions"
+        # Interner: customers, transactions, cust_001, cust_002, cust_003, txn_100, txn_101, txn_102 (8 items)
+        assert frame.interner_size() == 8
 
         collection = frame.get_collection("splink")
         assert collection is not None
@@ -81,7 +73,7 @@ class TestEntityFrame:
         frame.add_method("dedupe", method2_data)
 
         # The interner should have deduplicated "cust_001"
-        assert frame.interner_size() == 4  # cust_001, cust_002, cust_003 + "customers"
+        assert frame.interner_size() == 4  # customers, cust_001, cust_002, cust_003
         assert frame.collection_count() == 2
         assert frame.total_entities() == 2
 
@@ -174,7 +166,7 @@ class TestEntityFrame:
         assert frame.entity_has_dataset("dedupe", 1, "addresses")
 
     def test_interner_property_access(self):
-        """Test accessing the frame's interner."""
+        """Test accessing the frame's simplified interner."""
         frame = EntityFrame()
 
         interner = frame.interner
@@ -183,7 +175,7 @@ class TestEntityFrame:
 
         # Add some data and check interner grows
         frame.add_method("splink", [{"customers": ["cust_001"]}])
-        assert frame.interner_size() == 2  # "cust_001" + "customers"
+        assert frame.interner_size() == 2  # "customers" + "cust_001"
 
     def test_frame_with_empty_collections(self):
         """Test frame behavior with empty collections."""
@@ -213,6 +205,145 @@ class TestEntityFrame:
 
         assert frame.collection_count() == 3
         assert frame.total_entities() == 3  # 2 + 1 + 0
-        assert frame.interner_size() == 4  # c1, c2, c3 + "customers"
+        assert frame.interner_size() == 4  # customers, c1, c2, c3
 
         assert sorted(frame.get_collection_names()) == ["method1", "method2", "method3"]
+
+    def test_frame_dataset_declaration_and_usage(self):
+        """Test that datasets can be declared and used correctly."""
+
+        frame = EntityFrame()
+
+        # Declare some datasets upfront
+        frame.declare_dataset("dataset_a")
+        frame.declare_dataset("dataset_b")
+
+        # Add a method with those datasets
+        frame.add_method(
+            "test_method",
+            [
+                {"dataset_a": ["rec1", "rec2"], "dataset_b": ["rec3", "rec4"]},
+                {
+                    "dataset_a": ["rec5"],
+                    "dataset_c": ["rec6", "rec7"],  # This dataset gets auto-declared
+                },
+            ],
+        )
+
+        # Verify the collection was added
+        assert "test_method" in frame.get_collection_names()
+
+        # Get the collection back and verify it works correctly
+        retrieved_collection = frame.get_collection("test_method")
+        assert retrieved_collection is not None
+        assert retrieved_collection.len() == 2
+
+        # Check that entities can be accessed with the frame's dataset names
+        assert frame.entity_has_dataset("test_method", 0, "dataset_a")
+        assert frame.entity_has_dataset("test_method", 0, "dataset_b")
+        assert frame.entity_has_dataset("test_method", 1, "dataset_a")
+        assert frame.entity_has_dataset("test_method", 1, "dataset_c")
+
+        # Verify all datasets are known to the frame
+        dataset_names = frame.get_dataset_names()
+        assert "dataset_a" in dataset_names
+        assert "dataset_b" in dataset_names
+        assert "dataset_c" in dataset_names
+
+    def test_multiple_methods_share_datasets(self):
+        """Test that multiple methods can share dataset names efficiently."""
+
+        frame = EntityFrame()
+
+        # Add first method
+        frame.add_method(
+            "method1", [{"dataset_a": ["rec1", "rec2"], "dataset_b": ["rec3"]}]
+        )
+
+        # Add second method with overlapping dataset names
+        frame.add_method(
+            "method2",
+            [
+                {
+                    "dataset_a": ["rec4", "rec5"],  # Same dataset name
+                    "dataset_c": ["rec6"],  # New dataset
+                }
+            ],
+        )
+
+        # Verify both collections exist
+        assert set(frame.get_collection_names()) == {"method1", "method2"}
+
+        # Verify datasets are properly registered
+        assert "dataset_a" in frame.get_dataset_names()
+        assert "dataset_b" in frame.get_dataset_names()
+        assert "dataset_c" in frame.get_dataset_names()
+
+        # Verify we can compare the collections
+        comparisons = frame.compare_collections("method1", "method2")
+        assert len(comparisons) == 1
+        assert comparisons[0]["jaccard"] == 0.0  # No overlap in records
+
+    def test_add_method_creates_collection_with_entities(self):
+        """Test that add_method creates a collection with the correct entities."""
+
+        frame = EntityFrame()
+
+        # Add a method with entity data
+        frame.add_method("test", [{"data": ["id1", "id2", "id3"]}])
+
+        # Verify the collection was created
+        assert frame.collection_count() == 1
+        assert "test" in frame.get_collection_names()
+
+        # Verify the entity has the correct number of records
+        retrieved = frame.get_collection("test")
+        entity = retrieved.get_entity(0)
+        assert entity.total_records() == 3
+
+        # Verify interner has dataset name + records
+        assert frame.interner_size() == 4  # data, id1, id2, id3
+
+    def test_multiple_methods_with_diverse_datasets(self):
+        """Test multiple methods with different dataset combinations."""
+
+        # Create frame with pre-declared datasets
+        frame = EntityFrame.with_datasets(["customers", "orders", "products"])
+
+        # Add first method
+        frame.add_method(
+            "method1",
+            [
+                {"customers": ["c1", "c2"], "orders": ["o1"]},
+                {"customers": ["c3"], "products": ["p1", "p2"]},
+            ],
+        )
+
+        # Add second method with different dataset combinations
+        frame.add_method(
+            "method2",
+            [
+                {"customers": ["c4", "c5"], "products": ["p3"]},
+                {"orders": ["o2", "o3"], "products": ["p4"]},
+            ],
+        )
+
+        # Verify both work correctly
+        assert len(frame.get_collection_names()) == 2
+
+        # Compare them
+        comparisons = frame.compare_collections("method1", "method2")
+        assert len(comparisons) == 2
+
+        # Entity 0 comparison:
+        # method1: {"customers": ["c1", "c2"], "orders": ["o1"]}
+        # method2: {"customers": ["c4", "c5"], "products": ["p3"]}
+        # No record overlap, so Jaccard should be 0.0
+
+        # Entity 1 comparison:
+        # method1: {"customers": ["c3"], "products": ["p1", "p2"]}
+        # method2: {"orders": ["o2", "o3"], "products": ["p4"]}
+        # No record overlap, so Jaccard should be 0.0
+
+        # Both should be 0.0 since record IDs are different even though datasets overlap
+        assert all(comp["jaccard"] == 0.0 for comp in comparisons)

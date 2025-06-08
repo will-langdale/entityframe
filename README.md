@@ -118,35 +118,25 @@ similarity = entity.jaccard_similarity(other_entity)
 print(f"Jaccard similarity: {similarity:.2f}")
 ```
 
-## Collection modes
+## Working with multiple methods
 
-EntityCollection supports two modes:
+EntityFrame makes it simple to compare different entity resolution approaches:
 
-**Standalone mode** (own interner):
-```python
-collection = ef.EntityCollection("splink")
-collection.add_entities_standalone(entity_data)
-# Collection manages its own string interning
-```
-
-**Shared interner mode** (cross-collection comparison):
-```python
-collection1 = ef.EntityCollection("splink")
-collection2 = ef.EntityCollection("dedupe")
-interner = ef.StringInterner()
-
-# Both collections use the same interner for consistent dataset IDs
-interner = collection1.add_entities(data1, interner)
-interner = collection2.add_entities(data2, interner)
-
-# Now collections can be meaningfully compared
-comparisons = collection1.compare_with(collection2)
-```
-
-**Frame mode** (centralized management):
 ```python
 frame = ef.EntityFrame()
-frame.add_method("splink", entity_data)  # Frame manages all interning
+
+# Add results from different methods
+frame.add_method("splink", splink_results)
+frame.add_method("dedupe", dedupe_results) 
+frame.add_method("custom_rules", rules_results)
+
+# Compare any two methods
+comparisons = frame.compare_collections("splink", "dedupe")
+print(f"Methods agree on {len([c for c in comparisons if c['jaccard'] > 0.8])} entities")
+
+# See what methods you have
+print(f"Methods: {frame.get_collection_names()}")
+print(f"Total entities per method: {frame.total_entities() // len(frame.get_collection_names())}")
 ```
 
 ## API overview
@@ -155,28 +145,26 @@ frame.add_method("splink", entity_data)  # Frame manages all interning
 
 ```python
 frame = ef.EntityFrame()
-frame = ef.EntityFrame.with_datasets(["ds1", "ds2"])  # Pre-declare datasets (recommended)
-frame.declare_dataset(name)                      # Declare single dataset
-frame.add_method(name, entity_data)              # Add collection results (auto-declares datasets)
+frame = ef.EntityFrame.with_datasets(["ds1", "ds2"])  # Pre-declare datasets (optional)
+frame.add_method(name, entity_data)              # Add method results 
 frame.add_collection(name, collection)           # Add pre-built collection  
-frame.compare_collections(name1, name2)          # Compare two collections
+frame.compare_collections(name1, name2)          # Compare two methods
 frame.get_collection(name)                       # Get specific collection
-frame.get_collection_names()                     # List all collections
+frame.get_collection_names()                     # List all methods
 frame.total_entities()                           # Count total entities
+frame.entity_has_dataset(method, index, name)    # Check if entity has dataset
 ```
 
 ### `EntityCollection`
 
 ```python
-collection = ef.EntityCollection("process_name")
-collection.add_entities_standalone(entity_data)  # Add entities (standalone mode)
-collection.add_entities(entity_data, interner)   # Add entities (shared interner mode)
+collection = ef.EntityCollection("method_name")
 collection.get_entity(index)                     # Get entity by index
 collection.get_entities()                        # Get all entities
-collection.entity_has_dataset(index, name)       # Check if entity has dataset
 collection.len()                                 # Number of entities
-collection.compare_with(other_collection)        # Compare collections
-collection.interner                              # Access collection's interner
+collection.compare_with(other_collection)        # Compare with another collection
+collection.total_records()                       # Count all records
+collection.is_empty()                            # Check if empty
 ```
 
 ### `Entity`
@@ -212,10 +200,9 @@ entity_data = [
 
 EntityFrame is built for scale:
 
-- **String interning**: 10-100x memory reduction
-- **Roaring bitmaps**: SIMD-optimized set operations  
-- **Rust core**: High-performance implementation
-- **Shared memory**: Multiple methods share string pools
+- **Memory efficient**: Handles millions of entities without breaking a sweat
+- **Fast comparisons**: Optimised set operations for entity comparison
+- **Rust powered**: High-performance core with Python convenience
 
 Handle millions of entities efficiently.
 
@@ -224,7 +211,7 @@ Handle millions of entities efficiently.
 ```bash
 just install    # Install dependencies
 just build      # Build Rust extension  
-just test-all   # Run all tests
+just test       # Run all tests
 just format     # Format code
 ```
 
