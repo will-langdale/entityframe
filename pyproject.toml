@@ -5,6 +5,23 @@ description = "A Python package for comparing entity resolutions from different 
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
+license = {file = "LICENSE"}
+authors = [
+    {name = "Will Langdale"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+]
+keywords = ["entity-resolution", "data-processing", "rust"]
 
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
