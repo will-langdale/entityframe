@@ -227,40 +227,6 @@ impl EntityCollection {
         }
     }
 
-    /// Legacy method for backward compatibility (will auto-declare datasets)
-    fn add_entities(
-        &mut self,
-        entity_data: Vec<HashMap<String, Vec<String>>>,
-        interner: &mut StringInterner,
-    ) {
-        // For backward compatibility, we'll use a simple hash-based approach
-        // This is less efficient than the Frame-managed approach
-        self.entities.reserve(entity_data.len());
-
-        for entity_dict in entity_data {
-            let mut entity = Entity::new();
-
-            for (dataset_name, record_ids) in entity_dict {
-                // Use hash-based dataset ID for compatibility
-                let dataset_id = {
-                    use std::collections::hash_map::DefaultHasher;
-                    let mut hasher = DefaultHasher::new();
-                    dataset_name.hash(&mut hasher);
-                    hasher.finish() as u32
-                };
-
-                let mut interned_record_ids = Vec::with_capacity(record_ids.len());
-                for record_id in record_ids {
-                    interned_record_ids.push(interner.intern(&record_id));
-                }
-
-                entity.add_records_by_id(dataset_id, interned_record_ids);
-            }
-
-            self.entities.push(entity);
-        }
-    }
-
     /// Get all entities in this collection
     fn get_entities(&self) -> Vec<Entity> {
         self.entities.clone()
@@ -542,33 +508,6 @@ impl EntityFrame {
             Ok(false)
         }
     }
-
-    // Legacy methods for backward compatibility
-    /// Get method names (alias for get_collection_names)
-    fn get_method_names(&self) -> Vec<String> {
-        self.get_collection_names()
-    }
-
-    /// Get entities for a method (alias for get_collection)
-    fn get_entities(&self, method_name: &str) -> Option<Vec<Entity>> {
-        self.collections
-            .get(method_name)
-            .map(|collection| collection.get_entities())
-    }
-
-    /// Compare methods (alias for compare_collections)
-    fn compare_methods(
-        &self,
-        method1: &str,
-        method2: &str,
-    ) -> PyResult<Vec<HashMap<String, PyObject>>> {
-        self.compare_collections(method1, method2)
-    }
-
-    /// Get method count (alias for collection_count)
-    fn method_count(&self) -> usize {
-        self.collection_count()
-    }
 }
 
 /// A Python module implemented in Rust.
@@ -659,80 +598,6 @@ mod tests {
     }
 
     #[test]
-    fn test_entity_collection_add_entities() {
-        let mut collection = EntityCollection::new("splink");
-        let mut interner = StringInterner::new();
-
-        let entity_data = vec![
-            {
-                let mut entity = HashMap::new();
-                entity.insert(
-                    "customers".to_string(),
-                    vec!["cust_001".to_string(), "cust_002".to_string()],
-                );
-                entity.insert("transactions".to_string(), vec!["txn_100".to_string()]);
-                entity
-            },
-            {
-                let mut entity = HashMap::new();
-                entity.insert("customers".to_string(), vec!["cust_003".to_string()]);
-                entity.insert(
-                    "transactions".to_string(),
-                    vec!["txn_101".to_string(), "txn_102".to_string()],
-                );
-                entity
-            },
-        ];
-
-        collection.add_entities(entity_data, &mut interner);
-
-        assert_eq!(collection.len(), 2);
-        assert!(!collection.is_empty());
-        assert_eq!(collection.total_records(), 6); // 3 + 3 records
-
-        // Check that the interner was used
-        assert_eq!(interner.len(), 5); // cust_001, cust_002, cust_003, txn_100, txn_101, txn_102
-
-        // Test entity retrieval
-        let entity1 = collection.get_entity(0).unwrap();
-        assert_eq!(entity1.total_records(), 3);
-
-        let entity2 = collection.get_entity(1).unwrap();
-        assert_eq!(entity2.total_records(), 3);
-    }
-
-    #[test]
-    fn test_entity_collection_compare() {
-        let mut collection1 = EntityCollection::new("splink");
-        let mut collection2 = EntityCollection::new("dedupe");
-        let mut interner = StringInterner::new();
-
-        // Add identical data to both collections
-        let entity_data = vec![{
-            let mut entity = HashMap::new();
-            entity.insert(
-                "customers".to_string(),
-                vec!["cust_001".to_string(), "cust_002".to_string()],
-            );
-            entity
-        }];
-
-        collection1.add_entities(entity_data.clone(), &mut interner);
-        collection2.add_entities(entity_data, &mut interner);
-
-        // Since we can't easily test the PyObject return in unit tests,
-        // we can verify the logic by comparing entities directly
-        let entities1 = collection1.get_entities();
-        let entities2 = collection2.get_entities();
-
-        assert_eq!(entities1.len(), entities2.len());
-
-        // Entities should be identical (Jaccard = 1.0)
-        let similarity = entities1[0].jaccard_similarity(&entities2[0]);
-        assert_eq!(similarity, 1.0);
-    }
-
-    #[test]
     fn test_entity_frame_creation() {
         let frame = EntityFrame::new();
         assert_eq!(frame.collection_count(), 0);
@@ -744,24 +609,16 @@ mod tests {
     #[test]
     fn test_entity_frame_add_collection() {
         let mut frame = EntityFrame::new();
-        let mut collection = EntityCollection::new("splink");
-        let mut interner = frame.interner();
+        let collection = EntityCollection::new("splink");
 
-        let entity_data = vec![{
-            let mut entity = HashMap::new();
-            entity.insert("customers".to_string(), vec!["cust_001".to_string()]);
-            entity
-        }];
-
-        collection.add_entities(entity_data, &mut interner);
         frame.add_collection("splink", collection);
 
         assert_eq!(frame.collection_count(), 1);
-        assert_eq!(frame.total_entities(), 1);
+        assert_eq!(frame.total_entities(), 0); // Empty collection
         assert!(frame.get_collection_names().contains(&"splink".to_string()));
 
         let retrieved_collection = frame.get_collection("splink").unwrap();
-        assert_eq!(retrieved_collection.len(), 1);
+        assert_eq!(retrieved_collection.len(), 0);
         assert_eq!(retrieved_collection.process_name(), "splink");
     }
 
@@ -831,23 +688,5 @@ mod tests {
         assert_eq!(frame.interner_size(), 3); // cust_001, cust_002, cust_003
         assert_eq!(frame.collection_count(), 2);
         assert_eq!(frame.total_entities(), 2);
-    }
-
-    #[test]
-    fn test_entity_frame_legacy_methods() {
-        let mut frame = EntityFrame::new();
-
-        let entity_data = vec![{
-            let mut entity = HashMap::new();
-            entity.insert("customers".to_string(), vec!["cust_001".to_string()]);
-            entity
-        }];
-
-        frame.add_method("splink", entity_data);
-
-        // Test legacy method aliases
-        assert_eq!(frame.get_method_names(), frame.get_collection_names());
-        assert_eq!(frame.method_count(), frame.collection_count());
-        assert!(frame.get_entities("splink").is_some());
     }
 }
