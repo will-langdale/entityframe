@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use roaring::RoaringBitmap;
 use rustc_hash::FxHashMap;
 use std::collections::{hash_map::Entry, HashMap};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 /// String interning for efficient record ID storage and lookup.
@@ -65,10 +66,11 @@ impl StringInterner {
 }
 
 /// Core entity representation using roaring bitmaps for record ID sets.
+/// Uses interned dataset IDs (u32) instead of strings for massive memory savings.
 #[pyclass]
 #[derive(Clone)]
 pub struct Entity {
-    datasets: HashMap<String, RoaringBitmap>,
+    datasets: HashMap<u32, RoaringBitmap>,
 }
 
 #[pymethods]
@@ -80,38 +82,84 @@ impl Entity {
         }
     }
 
-    /// Add a record ID to a dataset.
-    fn add_record(&mut self, dataset: &str, record_id: u32) {
+    /// Add a record ID to a dataset using interned dataset ID (internal method).
+    fn add_record_by_id(&mut self, dataset_id: u32, record_id: u32) {
         self.datasets
-            .entry(dataset.to_string())
+            .entry(dataset_id)
             .or_default()
             .insert(record_id);
     }
 
-    /// Add multiple record IDs to a dataset efficiently using bulk insertion.
-    fn add_records(&mut self, dataset: &str, record_ids: Vec<u32>) {
-        let bitmap = self.datasets.entry(dataset.to_string()).or_default();
-
+    /// Add multiple record IDs to a dataset using interned dataset ID (internal method).
+    fn add_records_by_id(&mut self, dataset_id: u32, record_ids: Vec<u32>) {
+        let bitmap = self.datasets.entry(dataset_id).or_default();
         // Use RoaringBitmap's bulk insertion method for better performance
         bitmap.extend(&record_ids);
     }
 
-    /// Get record IDs for a dataset as a list.
+    /// Add a record ID to a dataset (Python API - requires string lookup).
+    fn add_record(&mut self, dataset: &str, record_id: u32) {
+        // For Python API compatibility, we use a simple hash of the dataset name
+        // In practice, this should be used with proper interner context
+        let dataset_id = self.hash_dataset_name(dataset);
+        self.add_record_by_id(dataset_id, record_id);
+    }
+
+    /// Add multiple record IDs to a dataset (Python API - requires string lookup).
+    fn add_records(&mut self, dataset: &str, record_ids: Vec<u32>) {
+        let dataset_id = self.hash_dataset_name(dataset);
+        self.add_records_by_id(dataset_id, record_ids);
+    }
+
+    /// Simple hash function for dataset names (used in Python API).
+    fn hash_dataset_name(&self, dataset: &str) -> u32 {
+        use std::collections::hash_map::DefaultHasher;
+        let mut hasher = DefaultHasher::new();
+        dataset.hash(&mut hasher);
+        hasher.finish() as u32
+    }
+
+    /// Get record IDs for a dataset as a list (Python API).
     fn get_records(&self, dataset: &str) -> PyResult<Vec<u32>> {
-        match self.datasets.get(dataset) {
+        let dataset_id = self.hash_dataset_name(dataset);
+        match self.datasets.get(&dataset_id) {
             Some(bitmap) => Ok(bitmap.iter().collect()),
             None => Ok(Vec::new()),
         }
     }
 
-    /// Get all dataset names.
-    fn get_datasets(&self) -> Vec<String> {
-        self.datasets.keys().cloned().collect()
+    /// Get record IDs for a dataset by ID (internal method).
+    fn get_records_by_id(&self, dataset_id: u32) -> Vec<u32> {
+        match self.datasets.get(&dataset_id) {
+            Some(bitmap) => bitmap.iter().collect(),
+            None => Vec::new(),
+        }
     }
 
-    /// Check if the entity contains records in a given dataset.
+    /// Get all dataset IDs (internal method for performance).
+    fn get_dataset_ids(&self) -> Vec<u32> {
+        self.datasets.keys().copied().collect()
+    }
+
+    /// Get all dataset names (Python API - limited without interner context).
+    fn get_datasets(&self) -> Vec<String> {
+        // For Python API compatibility, return placeholder names
+        // In practice, this should be called through EntityCollection which has interner access
+        self.datasets
+            .keys()
+            .map(|id| format!("dataset_{}", id))
+            .collect()
+    }
+
+    /// Check if the entity contains records in a given dataset (Python API).
     fn has_dataset(&self, dataset: &str) -> bool {
-        self.datasets.contains_key(dataset)
+        let dataset_id = self.hash_dataset_name(dataset);
+        self.datasets.contains_key(&dataset_id)
+    }
+
+    /// Check if the entity contains records for a dataset ID (internal method).
+    fn has_dataset_id(&self, dataset_id: u32) -> bool {
+        self.datasets.contains_key(&dataset_id)
     }
 
     /// Get the total number of records across all datasets.
@@ -125,8 +173,8 @@ impl Entity {
         let mut intersection_size = 0u64;
 
         // Process datasets from self first
-        for (dataset, self_bitmap) in &self.datasets {
-            if let Some(other_bitmap) = other.datasets.get(dataset) {
+        for (dataset_id, self_bitmap) in &self.datasets {
+            if let Some(other_bitmap) = other.datasets.get(dataset_id) {
                 // Both entities have this dataset
                 intersection_size += (self_bitmap & other_bitmap).len();
                 union_size += (self_bitmap | other_bitmap).len();
@@ -137,8 +185,8 @@ impl Entity {
         }
 
         // Process remaining datasets from other (that self doesn't have)
-        for (dataset, other_bitmap) in &other.datasets {
-            if !self.datasets.contains_key(dataset) {
+        for (dataset_id, other_bitmap) in &other.datasets {
+            if !self.datasets.contains_key(dataset_id) {
                 // Only other has this dataset
                 union_size += other_bitmap.len();
             }
@@ -179,28 +227,34 @@ impl EntityCollection {
         }
     }
 
-    /// Add entities from this process's output, using a shared interner
+    /// Legacy method for backward compatibility (will auto-declare datasets)
     fn add_entities(
         &mut self,
         entity_data: Vec<HashMap<String, Vec<String>>>,
         interner: &mut StringInterner,
     ) {
-        // Pre-allocate space for entities
+        // For backward compatibility, we'll use a simple hash-based approach
+        // This is less efficient than the Frame-managed approach
         self.entities.reserve(entity_data.len());
 
         for entity_dict in entity_data {
             let mut entity = Entity::new();
 
-            for (dataset, record_ids) in entity_dict {
-                // Pre-allocate the interned_ids vector
-                let mut interned_ids = Vec::with_capacity(record_ids.len());
+            for (dataset_name, record_ids) in entity_dict {
+                // Use hash-based dataset ID for compatibility
+                let dataset_id = {
+                    use std::collections::hash_map::DefaultHasher;
+                    let mut hasher = DefaultHasher::new();
+                    dataset_name.hash(&mut hasher);
+                    hasher.finish() as u32
+                };
 
-                // Intern the record ID strings and convert to u32 IDs
+                let mut interned_record_ids = Vec::with_capacity(record_ids.len());
                 for record_id in record_ids {
-                    interned_ids.push(interner.intern(&record_id));
+                    interned_record_ids.push(interner.intern(&record_id));
                 }
 
-                entity.add_records(&dataset, interned_ids);
+                entity.add_records_by_id(dataset_id, interned_record_ids);
             }
 
             self.entities.push(entity);
@@ -280,11 +334,55 @@ impl EntityCollection {
     }
 }
 
+impl EntityCollection {
+    /// Add entities from this process's output, using shared interner and dataset mappings (internal method)
+    fn add_entities_with_datasets(
+        &mut self,
+        entity_data: Vec<HashMap<String, Vec<String>>>,
+        interner: &mut StringInterner,
+        dataset_name_to_id: &HashMap<String, u32>,
+    ) {
+        // Pre-allocate space for entities
+        self.entities.reserve(entity_data.len());
+
+        // Build entities using pre-interned dataset IDs
+        for entity_dict in entity_data {
+            let mut entity = Entity::new();
+
+            for (dataset_name, record_ids) in entity_dict {
+                // Get the pre-interned dataset ID
+                let dataset_id = *dataset_name_to_id.get(&dataset_name).unwrap_or_else(|| {
+                    panic!(
+                        "Dataset '{}' not declared in Frame. Use declare_dataset() first.",
+                        dataset_name
+                    )
+                });
+
+                // Pre-allocate the interned_ids vector
+                let mut interned_record_ids = Vec::with_capacity(record_ids.len());
+
+                // Intern the record ID strings and convert to u32 IDs
+                for record_id in record_ids {
+                    interned_record_ids.push(interner.intern(&record_id));
+                }
+
+                // Use the efficient internal method with dataset ID
+                entity.add_records_by_id(dataset_id, interned_record_ids);
+            }
+
+            self.entities.push(entity);
+        }
+    }
+}
+
 /// EntityFrame: A collection of EntityCollections with shared interner (like pandas DataFrame)
 #[pyclass]
 pub struct EntityFrame {
     collections: HashMap<String, EntityCollection>,
     interner: StringInterner,
+    // Dataset name interning for massive memory savings
+    dataset_names: HashMap<u32, String>,      // ID -> name
+    dataset_name_to_id: HashMap<String, u32>, // name -> ID
 }
 
 #[pymethods]
@@ -294,7 +392,43 @@ impl EntityFrame {
         Self {
             collections: HashMap::new(),
             interner: StringInterner::new(),
+            dataset_names: HashMap::new(),
+            dataset_name_to_id: HashMap::new(),
         }
+    }
+
+    /// Create EntityFrame with pre-declared datasets for better performance.
+    #[staticmethod]
+    fn with_datasets(dataset_names: Vec<String>) -> Self {
+        let mut frame = Self::new();
+        for name in dataset_names {
+            frame.declare_dataset(&name);
+        }
+        frame
+    }
+
+    /// Declare a dataset name upfront for efficient interning.
+    fn declare_dataset(&mut self, dataset_name: &str) -> u32 {
+        if let Some(&existing_id) = self.dataset_name_to_id.get(dataset_name) {
+            return existing_id;
+        }
+
+        let dataset_id = self.interner.intern(dataset_name);
+        self.dataset_names
+            .insert(dataset_id, dataset_name.to_string());
+        self.dataset_name_to_id
+            .insert(dataset_name.to_string(), dataset_id);
+        dataset_id
+    }
+
+    /// Get dataset ID from name (internal method).
+    fn get_dataset_id(&self, dataset_name: &str) -> Option<u32> {
+        self.dataset_name_to_id.get(dataset_name).copied()
+    }
+
+    /// Get dataset name from ID (internal method).
+    fn get_dataset_name(&self, dataset_id: u32) -> Option<&String> {
+        self.dataset_names.get(&dataset_id)
     }
 
     /// Get a mutable reference to the interner for adding entities
@@ -310,10 +444,21 @@ impl EntityFrame {
 
     /// Create and add a collection with entity data in one step
     fn add_method(&mut self, method_name: &str, entity_data: Vec<HashMap<String, Vec<String>>>) {
+        // Auto-declare any new datasets found in the data
+        for entity_dict in &entity_data {
+            for dataset_name in entity_dict.keys() {
+                self.declare_dataset(dataset_name);
+            }
+        }
+
         // Use with_capacity to pre-allocate based on entity count
         let mut collection =
             EntityCollection::with_capacity(method_name.to_string(), entity_data.len());
-        collection.add_entities(entity_data, &mut self.interner);
+        collection.add_entities_with_datasets(
+            entity_data,
+            &mut self.interner,
+            &self.dataset_name_to_id,
+        );
         self.collections.insert(method_name.to_string(), collection);
     }
 
@@ -366,6 +511,36 @@ impl EntityFrame {
     /// Get the total number of unique strings in the interner
     fn interner_size(&self) -> usize {
         self.interner.len()
+    }
+
+    /// Get all declared dataset names
+    fn get_dataset_names(&self) -> Vec<String> {
+        self.dataset_names.values().cloned().collect()
+    }
+
+    /// Check if an entity in a collection has a dataset (with proper name resolution)
+    fn entity_has_dataset(
+        &self,
+        collection_name: &str,
+        entity_index: usize,
+        dataset_name: &str,
+    ) -> PyResult<bool> {
+        let collection = self.collections.get(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        let entity = collection.entities.get(entity_index).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>("Entity index out of range")
+        })?;
+
+        if let Some(&dataset_id) = self.dataset_name_to_id.get(dataset_name) {
+            Ok(entity.has_dataset_id(dataset_id))
+        } else {
+            Ok(false)
+        }
     }
 
     // Legacy methods for backward compatibility

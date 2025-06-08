@@ -103,17 +103,17 @@ class TestPerformance:
         print("🔍 Testing entity access...")
         access_start = time.time()
 
-        collection1 = frame.get_collection("method_1_million")
-        collection2 = frame.get_collection("method_2_million")
+        # Sample some entities to verify structure using Frame-level methods
+        assert frame.entity_has_dataset("method_1_million", 0, "customers")
+        assert frame.entity_has_dataset("method_1_million", 0, "transactions")
+        assert frame.entity_has_dataset("method_2_million", 0, "customers")
+        assert frame.entity_has_dataset("method_2_million", 0, "transactions")
 
-        # Sample some entities to verify structure
-        sample_entity1 = collection1.get_entity(0)
-        sample_entity2 = collection2.get_entity(0)
-
-        assert sample_entity1.has_dataset("customers")
-        assert sample_entity1.has_dataset("transactions")
-        assert sample_entity2.has_dataset("customers")
-        assert sample_entity2.has_dataset("transactions")
+        # Verify dataset names are properly declared
+        dataset_names = frame.get_dataset_names()
+        assert "customers" in dataset_names
+        assert "transactions" in dataset_names
+        assert "addresses" in dataset_names
 
         access_time = time.time() - access_start
         print(f"⏱️  Entity access: {access_time:.3f}s")

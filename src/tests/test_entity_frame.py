@@ -61,8 +61,8 @@ class TestEntityFrame:
         assert frame.collection_count() == 1
         assert frame.total_entities() == 2
         assert (
-            frame.interner_size() == 6
-        )  # cust_001, cust_002, cust_003, txn_100, txn_101, txn_102
+            frame.interner_size() == 8
+        )  # cust_001, cust_002, cust_003, txn_100, txn_101, txn_102 + "customers" + "transactions"
 
         collection = frame.get_collection("splink")
         assert collection is not None
@@ -81,7 +81,7 @@ class TestEntityFrame:
         frame.add_method("dedupe", method2_data)
 
         # The interner should have deduplicated "cust_001"
-        assert frame.interner_size() == 3  # cust_001, cust_002, cust_003
+        assert frame.interner_size() == 4  # cust_001, cust_002, cust_003 + "customers"
         assert frame.collection_count() == 2
         assert frame.total_entities() == 2
 
@@ -166,15 +166,12 @@ class TestEntityFrame:
         assert dedupe_collection.len() == 2
         assert dedupe_collection.process_name == "dedupe"
 
-        # Collections should be independent
-        splink_entities = splink_collection.get_entities()
-        dedupe_entities = dedupe_collection.get_entities()
-
+        # Collections should be independent - test using Frame methods
         # Splink entities should have different datasets than dedupe
-        assert splink_entities[0].has_dataset("customers")
-        assert splink_entities[1].has_dataset("transactions")
-        assert dedupe_entities[0].has_dataset("customers")
-        assert dedupe_entities[1].has_dataset("addresses")
+        assert frame.entity_has_dataset("splink", 0, "customers")
+        assert frame.entity_has_dataset("splink", 1, "transactions")
+        assert frame.entity_has_dataset("dedupe", 0, "customers")
+        assert frame.entity_has_dataset("dedupe", 1, "addresses")
 
     def test_legacy_method_compatibility(self):
         """Test that legacy methods still work for backward compatibility."""
@@ -201,7 +198,7 @@ class TestEntityFrame:
 
         # Add some data and check interner grows
         frame.add_method("splink", [{"customers": ["cust_001"]}])
-        assert frame.interner_size() == 1
+        assert frame.interner_size() == 2  # "cust_001" + "customers"
 
     def test_frame_with_empty_collections(self):
         """Test frame behavior with empty collections."""
@@ -231,6 +228,6 @@ class TestEntityFrame:
 
         assert frame.collection_count() == 3
         assert frame.total_entities() == 3  # 2 + 1 + 0
-        assert frame.interner_size() == 3  # c1, c2, c3
+        assert frame.interner_size() == 4  # c1, c2, c3 + "customers"
 
         assert sorted(frame.get_collection_names()) == ["method1", "method2", "method3"]

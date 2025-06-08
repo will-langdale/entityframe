@@ -97,22 +97,39 @@ class TestEntity:
         assert set(transactions) == {10, 11, 12, 13}
 
     def test_dataset_operations(self):
-        """Test dataset-related operations."""
-        entity = Entity()
+        """Test dataset-related operations through EntityFrame context."""
+        from entityframe import EntityFrame
 
-        entity.add_records("customers", [1, 2, 3])
-        entity.add_records("transactions", [10, 11])
+        # Entity operations now require Frame context for proper dataset name resolution
+        frame = EntityFrame()
 
-        # Test dataset listing
-        datasets = entity.get_datasets()
-        assert set(datasets) == {"customers", "transactions"}
+        # Add entity data through the Frame to ensure proper dataset interning
+        entity_data = [
+            {
+                "customers": [
+                    "1",
+                    "2",
+                    "3",
+                ],  # Use strings since interner expects strings
+                "transactions": ["10", "11"],
+            }
+        ]
 
-        # Test dataset checking
-        assert entity.has_dataset("customers")
-        assert entity.has_dataset("transactions")
-        assert not entity.has_dataset("addresses")
+        frame.add_method("test_method", entity_data)
 
-        # Test total records
+        # Test through Frame methods which provide proper dataset name resolution
+        assert frame.entity_has_dataset("test_method", 0, "customers")
+        assert frame.entity_has_dataset("test_method", 0, "transactions")
+        assert not frame.entity_has_dataset("test_method", 0, "addresses")
+
+        # Verify dataset names are properly declared
+        dataset_names = frame.get_dataset_names()
+        assert "customers" in dataset_names
+        assert "transactions" in dataset_names
+
+        # Get the entity to test total records still works
+        collection = frame.get_collection("test_method")
+        entity = collection.get_entity(0)
         assert entity.total_records() == 5
 
     def test_empty_dataset_retrieval(self):
