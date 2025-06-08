@@ -29,7 +29,7 @@ class TestEntityFrame:
             {"customers": ["cust_003"]},
         ]
 
-        collection.add_entities(entity_data, interner)
+        interner = collection.add_entities(entity_data, interner)
         frame.add_collection("splink", collection)
 
         assert frame.collection_count() == 1
@@ -172,21 +172,6 @@ class TestEntityFrame:
         assert frame.entity_has_dataset("splink", 1, "transactions")
         assert frame.entity_has_dataset("dedupe", 0, "customers")
         assert frame.entity_has_dataset("dedupe", 1, "addresses")
-
-    def test_legacy_method_compatibility(self):
-        """Test that legacy methods still work for backward compatibility."""
-        frame = EntityFrame()
-
-        entity_data = [{"customers": ["cust_001", "cust_002"]}]
-        frame.add_method("splink", entity_data)
-
-        # Test legacy method aliases
-        assert frame.get_method_names() == frame.get_collection_names()
-        assert frame.method_count() == frame.collection_count()
-        assert frame.get_entities("splink") is not None
-        assert frame.compare_methods("splink", "splink") == frame.compare_collections(
-            "splink", "splink"
-        )
 
     def test_interner_property_access(self):
         """Test accessing the frame's interner."""

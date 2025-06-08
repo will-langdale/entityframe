@@ -35,7 +35,7 @@ class TestEntityCollection:
             },
         ]
 
-        collection.add_entities(entity_data, interner)
+        interner = collection.add_entities(entity_data, interner)
 
         assert collection.len() == 2
         assert not collection.is_empty()
@@ -43,8 +43,8 @@ class TestEntityCollection:
 
         # Check that interner was used
         assert (
-            interner.len() == 6
-        )  # cust_001, cust_002, cust_003, txn_100, txn_101, txn_102
+            interner.len() == 8
+        )  # customers, transactions, cust_001, cust_002, cust_003, txn_100, txn_101, txn_102
 
     def test_get_entity_by_index(self):
         """Test retrieving individual entities by index."""
@@ -56,7 +56,7 @@ class TestEntityCollection:
             {"customers": ["cust_003", "cust_004"]},
         ]
 
-        collection.add_entities(entity_data, interner)
+        interner = collection.add_entities(entity_data, interner)
 
         # Test valid indices
         entity1 = collection.get_entity(0)
@@ -80,14 +80,14 @@ class TestEntityCollection:
             {"customers": ["cust_003"]},
         ]
 
-        collection.add_entities(entity_data, interner)
+        interner = collection.add_entities(entity_data, interner)
 
         entities = collection.get_entities()
         assert len(entities) == 3
 
-        for entity in entities:
+        for i, entity in enumerate(entities):
             assert entity.total_records() == 1
-            assert entity.has_dataset("customers")
+            assert collection.entity_has_dataset(i, "customers")
 
     def test_compare_collections(self):
         """Test comparing two collections with same number of entities."""
@@ -130,8 +130,8 @@ class TestEntityCollection:
         data1 = [{"customers": ["cust_001", "cust_002", "cust_003"]}]
         data2 = [{"customers": ["cust_002", "cust_003", "cust_004"]}]
 
-        collection1.add_entities(data1, interner)
-        collection2.add_entities(data2, interner)
+        interner = collection1.add_entities(data1, interner)
+        interner = collection2.add_entities(data2, interner)
 
         comparisons = collection1.compare_with(collection2)
 
