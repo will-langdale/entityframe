@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 /// String interning for efficient record ID storage and lookup.
 #[pyclass]
+#[derive(Clone)]
 pub struct StringInterner {
     strings: Vec<Arc<str>>,
     string_to_id: FxHashMap<Arc<str>, u32>,
@@ -55,6 +56,7 @@ impl StringInterner {
 
 /// Core entity representation using roaring bitmaps for record ID sets.
 #[pyclass]
+#[derive(Clone)]
 pub struct Entity {
     datasets: HashMap<String, RoaringBitmap>,
 }
@@ -147,11 +149,240 @@ impl Entity {
     }
 }
 
+/// EntityCollection: A collection of entities from a single process (like pandas Series)
+#[pyclass]
+#[derive(Clone)]
+pub struct EntityCollection {
+    entities: Vec<Entity>,
+    process_name: String,
+}
+
+#[pymethods]
+impl EntityCollection {
+    #[new]
+    fn new(process_name: &str) -> Self {
+        Self {
+            entities: Vec::new(),
+            process_name: process_name.to_string(),
+        }
+    }
+
+    /// Add entities from this process's output, using a shared interner
+    fn add_entities(
+        &mut self,
+        entity_data: Vec<HashMap<String, Vec<String>>>,
+        interner: &mut StringInterner,
+    ) {
+        for entity_dict in entity_data {
+            let mut entity = Entity::new();
+
+            for (dataset, record_ids) in entity_dict {
+                // Intern the record ID strings and convert to u32 IDs
+                let interned_ids: Vec<u32> = record_ids
+                    .into_iter()
+                    .map(|record_id| interner.intern(&record_id))
+                    .collect();
+
+                entity.add_records(&dataset, interned_ids);
+            }
+
+            self.entities.push(entity);
+        }
+    }
+
+    /// Get all entities in this collection
+    fn get_entities(&self) -> Vec<Entity> {
+        self.entities.clone()
+    }
+
+    /// Get the process name for this collection
+    #[getter]
+    fn process_name(&self) -> &str {
+        &self.process_name
+    }
+
+    /// Get the number of entities in this collection
+    fn len(&self) -> usize {
+        self.entities.len()
+    }
+
+    /// Check if the collection is empty
+    fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+
+    /// Get the total number of records across all entities
+    fn total_records(&self) -> u64 {
+        self.entities
+            .iter()
+            .map(|entity| entity.total_records())
+            .sum()
+    }
+
+    /// Get an entity by index
+    fn get_entity(&self, index: usize) -> PyResult<Entity> {
+        self.entities.get(index).cloned().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>("Entity index out of range")
+        })
+    }
+
+    /// Compare this collection with another collection entity-by-entity
+    fn compare_with(&self, other: &EntityCollection) -> PyResult<Vec<HashMap<String, PyObject>>> {
+        if self.entities.len() != other.entities.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Collections must have the same number of entities to compare",
+            ));
+        }
+
+        Python::with_gil(|py| {
+            let mut comparisons = Vec::new();
+
+            for (i, (entity1, entity2)) in
+                self.entities.iter().zip(other.entities.iter()).enumerate()
+            {
+                let jaccard = entity1.jaccard_similarity(entity2);
+
+                let mut comparison = HashMap::new();
+                comparison.insert("entity_index".to_string(), i.into_py(py));
+                comparison.insert(
+                    "process1".to_string(),
+                    self.process_name.clone().into_py(py),
+                );
+                comparison.insert(
+                    "process2".to_string(),
+                    other.process_name.clone().into_py(py),
+                );
+                comparison.insert("jaccard".to_string(), jaccard.into_py(py));
+
+                comparisons.push(comparison);
+            }
+
+            Ok(comparisons)
+        })
+    }
+}
+
+/// EntityFrame: A collection of EntityCollections with shared interner (like pandas DataFrame)
+#[pyclass]
+pub struct EntityFrame {
+    collections: HashMap<String, EntityCollection>,
+    interner: StringInterner,
+}
+
+#[pymethods]
+impl EntityFrame {
+    #[new]
+    fn new() -> Self {
+        Self {
+            collections: HashMap::new(),
+            interner: StringInterner::new(),
+        }
+    }
+
+    /// Get a mutable reference to the interner for adding entities
+    #[getter]
+    fn interner(&self) -> StringInterner {
+        self.interner.clone()
+    }
+
+    /// Add a collection to the frame
+    fn add_collection(&mut self, name: &str, collection: EntityCollection) {
+        self.collections.insert(name.to_string(), collection);
+    }
+
+    /// Create and add a collection with entity data in one step
+    fn add_method(&mut self, method_name: &str, entity_data: Vec<HashMap<String, Vec<String>>>) {
+        let mut collection = EntityCollection::new(method_name);
+        collection.add_entities(entity_data, &mut self.interner);
+        self.collections.insert(method_name.to_string(), collection);
+    }
+
+    /// Get collection names in this frame
+    fn get_collection_names(&self) -> Vec<String> {
+        self.collections.keys().cloned().collect()
+    }
+
+    /// Get a collection by name
+    fn get_collection(&self, name: &str) -> Option<EntityCollection> {
+        self.collections.get(name).cloned()
+    }
+
+    /// Compare two collections and return similarities
+    fn compare_collections(
+        &self,
+        name1: &str,
+        name2: &str,
+    ) -> PyResult<Vec<HashMap<String, PyObject>>> {
+        let collection1 = self.collections.get(name1).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                name1
+            ))
+        })?;
+
+        let collection2 = self.collections.get(name2).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                name2
+            ))
+        })?;
+
+        collection1.compare_with(collection2)
+    }
+
+    /// Get the number of collections in this frame
+    fn collection_count(&self) -> usize {
+        self.collections.len()
+    }
+
+    /// Get the total number of entities across all collections
+    fn total_entities(&self) -> usize {
+        self.collections
+            .values()
+            .map(|collection| collection.len())
+            .sum()
+    }
+
+    /// Get the total number of unique strings in the interner
+    fn interner_size(&self) -> usize {
+        self.interner.len()
+    }
+
+    // Legacy methods for backward compatibility
+    /// Get method names (alias for get_collection_names)
+    fn get_method_names(&self) -> Vec<String> {
+        self.get_collection_names()
+    }
+
+    /// Get entities for a method (alias for get_collection)
+    fn get_entities(&self, method_name: &str) -> Option<Vec<Entity>> {
+        self.collections
+            .get(method_name)
+            .map(|collection| collection.get_entities())
+    }
+
+    /// Compare methods (alias for compare_collections)
+    fn compare_methods(
+        &self,
+        method1: &str,
+        method2: &str,
+    ) -> PyResult<Vec<HashMap<String, PyObject>>> {
+        self.compare_collections(method1, method2)
+    }
+
+    /// Get method count (alias for collection_count)
+    fn method_count(&self) -> usize {
+        self.collection_count()
+    }
+}
+
 /// A Python module implemented in Rust.
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<StringInterner>()?;
     m.add_class::<Entity>()?;
+    m.add_class::<EntityCollection>()?;
+    m.add_class::<EntityFrame>()?;
     Ok(())
 }
 
@@ -221,5 +452,207 @@ mod tests {
         // Jaccard = 3/7 ≈ 0.428
         let similarity = entity1.jaccard_similarity(&entity2);
         assert!((similarity - 3.0 / 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_entity_collection_creation() {
+        let collection = EntityCollection::new("splink");
+        assert_eq!(collection.process_name(), "splink");
+        assert_eq!(collection.len(), 0);
+        assert!(collection.is_empty());
+        assert_eq!(collection.total_records(), 0);
+    }
+
+    #[test]
+    fn test_entity_collection_add_entities() {
+        let mut collection = EntityCollection::new("splink");
+        let mut interner = StringInterner::new();
+
+        let entity_data = vec![
+            {
+                let mut entity = HashMap::new();
+                entity.insert(
+                    "customers".to_string(),
+                    vec!["cust_001".to_string(), "cust_002".to_string()],
+                );
+                entity.insert("transactions".to_string(), vec!["txn_100".to_string()]);
+                entity
+            },
+            {
+                let mut entity = HashMap::new();
+                entity.insert("customers".to_string(), vec!["cust_003".to_string()]);
+                entity.insert(
+                    "transactions".to_string(),
+                    vec!["txn_101".to_string(), "txn_102".to_string()],
+                );
+                entity
+            },
+        ];
+
+        collection.add_entities(entity_data, &mut interner);
+
+        assert_eq!(collection.len(), 2);
+        assert!(!collection.is_empty());
+        assert_eq!(collection.total_records(), 6); // 3 + 3 records
+
+        // Check that the interner was used
+        assert_eq!(interner.len(), 5); // cust_001, cust_002, cust_003, txn_100, txn_101, txn_102
+
+        // Test entity retrieval
+        let entity1 = collection.get_entity(0).unwrap();
+        assert_eq!(entity1.total_records(), 3);
+
+        let entity2 = collection.get_entity(1).unwrap();
+        assert_eq!(entity2.total_records(), 3);
+    }
+
+    #[test]
+    fn test_entity_collection_compare() {
+        let mut collection1 = EntityCollection::new("splink");
+        let mut collection2 = EntityCollection::new("dedupe");
+        let mut interner = StringInterner::new();
+
+        // Add identical data to both collections
+        let entity_data = vec![{
+            let mut entity = HashMap::new();
+            entity.insert(
+                "customers".to_string(),
+                vec!["cust_001".to_string(), "cust_002".to_string()],
+            );
+            entity
+        }];
+
+        collection1.add_entities(entity_data.clone(), &mut interner);
+        collection2.add_entities(entity_data, &mut interner);
+
+        // Since we can't easily test the PyObject return in unit tests,
+        // we can verify the logic by comparing entities directly
+        let entities1 = collection1.get_entities();
+        let entities2 = collection2.get_entities();
+
+        assert_eq!(entities1.len(), entities2.len());
+
+        // Entities should be identical (Jaccard = 1.0)
+        let similarity = entities1[0].jaccard_similarity(&entities2[0]);
+        assert_eq!(similarity, 1.0);
+    }
+
+    #[test]
+    fn test_entity_frame_creation() {
+        let frame = EntityFrame::new();
+        assert_eq!(frame.collection_count(), 0);
+        assert_eq!(frame.total_entities(), 0);
+        assert!(frame.get_collection_names().is_empty());
+        assert_eq!(frame.interner_size(), 0);
+    }
+
+    #[test]
+    fn test_entity_frame_add_collection() {
+        let mut frame = EntityFrame::new();
+        let mut collection = EntityCollection::new("splink");
+        let mut interner = frame.interner();
+
+        let entity_data = vec![{
+            let mut entity = HashMap::new();
+            entity.insert("customers".to_string(), vec!["cust_001".to_string()]);
+            entity
+        }];
+
+        collection.add_entities(entity_data, &mut interner);
+        frame.add_collection("splink", collection);
+
+        assert_eq!(frame.collection_count(), 1);
+        assert_eq!(frame.total_entities(), 1);
+        assert!(frame.get_collection_names().contains(&"splink".to_string()));
+
+        let retrieved_collection = frame.get_collection("splink").unwrap();
+        assert_eq!(retrieved_collection.len(), 1);
+        assert_eq!(retrieved_collection.process_name(), "splink");
+    }
+
+    #[test]
+    fn test_entity_frame_add_method() {
+        let mut frame = EntityFrame::new();
+
+        let entity_data = vec![
+            {
+                let mut entity = HashMap::new();
+                entity.insert(
+                    "customers".to_string(),
+                    vec!["cust_001".to_string(), "cust_002".to_string()],
+                );
+                entity.insert("transactions".to_string(), vec!["txn_100".to_string()]);
+                entity
+            },
+            {
+                let mut entity = HashMap::new();
+                entity.insert("customers".to_string(), vec!["cust_003".to_string()]);
+                entity.insert(
+                    "transactions".to_string(),
+                    vec!["txn_101".to_string(), "txn_102".to_string()],
+                );
+                entity
+            },
+        ];
+
+        frame.add_method("splink", entity_data);
+
+        assert_eq!(frame.collection_count(), 1);
+        assert_eq!(frame.total_entities(), 2);
+        assert_eq!(frame.interner_size(), 5); // 5 unique strings
+
+        let collection = frame.get_collection("splink").unwrap();
+        assert_eq!(collection.len(), 2);
+        assert_eq!(collection.process_name(), "splink");
+    }
+
+    #[test]
+    fn test_entity_frame_shared_interner() {
+        let mut frame = EntityFrame::new();
+
+        // Add two collections with overlapping record IDs
+        let method1_data = vec![{
+            let mut entity = HashMap::new();
+            entity.insert(
+                "customers".to_string(),
+                vec!["cust_001".to_string(), "cust_002".to_string()],
+            );
+            entity
+        }];
+
+        let method2_data = vec![{
+            let mut entity = HashMap::new();
+            entity.insert(
+                "customers".to_string(),
+                vec!["cust_001".to_string(), "cust_003".to_string()],
+            );
+            entity
+        }];
+
+        frame.add_method("splink", method1_data);
+        frame.add_method("dedupe", method2_data);
+
+        // The interner should have deduplicated "cust_001"
+        assert_eq!(frame.interner_size(), 3); // cust_001, cust_002, cust_003
+        assert_eq!(frame.collection_count(), 2);
+        assert_eq!(frame.total_entities(), 2);
+    }
+
+    #[test]
+    fn test_entity_frame_legacy_methods() {
+        let mut frame = EntityFrame::new();
+
+        let entity_data = vec![{
+            let mut entity = HashMap::new();
+            entity.insert("customers".to_string(), vec!["cust_001".to_string()]);
+            entity
+        }];
+
+        frame.add_method("splink", entity_data);
+
+        // Test legacy method aliases
+        assert_eq!(frame.get_method_names(), frame.get_collection_names());
+        assert_eq!(frame.method_count(), frame.collection_count());
+        assert!(frame.get_entities("splink").is_some());
     }
 }

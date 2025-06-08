@@ -1,9 +1,9 @@
 """
-Tests for core EntityFrame functionality.
+Tests for core EntityFrame components: StringInterner and Entity.
 """
 
 import pytest
-from entityframe import StringInterner, Entity, EntityCollection
+from entityframe import StringInterner, Entity
 
 
 class TestStringInterner:
@@ -56,6 +56,23 @@ class TestStringInterner:
         assert all(id == ids[0] for id in ids)
         assert interner.len() == 1
 
+    def test_large_scale_interning(self):
+        """Test interning performance with many strings."""
+        interner = StringInterner()
+
+        # Intern 1000 unique strings
+        ids = []
+        for i in range(1000):
+            id = interner.intern(f"string_{i}")
+            ids.append(id)
+
+        assert interner.len() == 1000
+        assert len(set(ids)) == 1000  # All IDs should be unique
+
+        # Test retrieval
+        for i, id in enumerate(ids):
+            assert interner.get_string(id) == f"string_{i}"
+
 
 class TestEntity:
     """Test the Entity functionality."""
@@ -105,6 +122,19 @@ class TestEntity:
         # Should return empty list for non-existent dataset
         records = entity.get_records("nonexistent")
         assert records == []
+
+    def test_duplicate_record_handling(self):
+        """Test that duplicate records are handled correctly by roaring bitmaps."""
+        entity = Entity()
+
+        # Add the same record multiple times
+        entity.add_record("customers", 1)
+        entity.add_record("customers", 1)
+        entity.add_record("customers", 1)
+
+        customers = entity.get_records("customers")
+        assert customers == [1]  # Should only appear once
+        assert entity.total_records() == 1
 
     def test_jaccard_similarity_identical(self):
         """Test Jaccard similarity for identical entities."""
@@ -167,101 +197,37 @@ class TestEntity:
         similarity = entity1.jaccard_similarity(entity2)
         assert similarity == 1.0  # Both empty, so considered identical
 
+    def test_entity_with_multiple_datasets(self):
+        """Test entity behavior with multiple diverse datasets."""
+        entity = Entity()
 
-class TestEntityCollection:
-    """Test the EntityCollection high-level API."""
+        # Add records to various datasets
+        entity.add_records("customers", [100, 101, 102])
+        entity.add_records("transactions", [200, 201])
+        entity.add_records("addresses", [300])
+        entity.add_records("phone_numbers", [400, 401, 402, 403])
 
-    def test_entity_collection_creation(self):
-        """Test basic EntityCollection operations."""
-        collection = EntityCollection()
+        assert entity.total_records() == 10
+        assert len(entity.get_datasets()) == 4
+        assert entity.has_dataset("customers")
+        assert entity.has_dataset("transactions")
+        assert entity.has_dataset("addresses")
+        assert entity.has_dataset("phone_numbers")
 
-        assert collection.get_method_names() == []
-        assert collection.get_entities("nonexistent") is None
+        # Check individual datasets
+        assert len(entity.get_records("customers")) == 3
+        assert len(entity.get_records("transactions")) == 2
+        assert len(entity.get_records("addresses")) == 1
+        assert len(entity.get_records("phone_numbers")) == 4
 
-    def test_add_method(self):
-        """Test adding method results to collection."""
-        collection = EntityCollection()
+    def test_entity_large_scale(self):
+        """Test entity performance with large numbers of records."""
+        entity = Entity()
 
-        # Create some test entity data
-        splink_data = [
-            {
-                "customers": ["cust_001", "cust_002"],
-                "transactions": ["txn_100", "txn_101"],
-            },
-            {
-                "customers": ["cust_003"],
-                "transactions": ["txn_102", "txn_103", "txn_104"],
-            },
-        ]
+        # Add 10,000 records to a dataset
+        large_record_set = list(range(10000))
+        entity.add_records("large_dataset", large_record_set)
 
-        collection.add_method("splink", splink_data)
-
-        # Check that method was added
-        assert "splink" in collection.get_method_names()
-
-        entities = collection.get_entities("splink")
-        assert entities is not None
-        assert len(entities) == 2
-
-        # Check first entity
-        entity1 = entities[0]
-        assert entity1.has_dataset("customers")
-        assert entity1.has_dataset("transactions")
-        assert entity1.total_records() == 4
-
-        # Check second entity
-        entity2 = entities[1]
-        assert entity2.total_records() == 4
-
-    def test_compare_methods(self):
-        """Test comparing two methods."""
-        collection = EntityCollection()
-
-        # Add two methods with identical data
-        method1_data = [
-            {"customers": ["cust_001", "cust_002"]},
-            {"customers": ["cust_003", "cust_004"]},
-        ]
-
-        method2_data = [
-            {"customers": ["cust_001", "cust_002"]},  # Identical
-            {"customers": ["cust_003", "cust_005"]},  # Partial overlap
-        ]
-
-        collection.add_method("method1", method1_data)
-        collection.add_method("method2", method2_data)
-
-        # Compare methods
-        comparison = collection.compare_methods("method1", "method2")
-
-        assert len(comparison) == 2
-
-        # First entity should be identical
-        assert comparison[0]["jaccard"] == 1.0
-        assert comparison[0]["method1"] == "method1"
-        assert comparison[0]["method2"] == "method2"
-
-        # Second entity should have partial overlap (2/3 = 0.666...)
-        expected_jaccard = (
-            1.0 / 3.0
-        )  # Intersection: {cust_003}, Union: {cust_003, cust_004, cust_005}
-        assert abs(comparison[1]["jaccard"] - expected_jaccard) < 1e-10
-
-    def test_string_interner_reuse(self):
-        """Test that string interner is reused across entities."""
-        collection = EntityCollection()
-
-        # Add methods with overlapping record IDs
-        method1_data = [{"customers": ["cust_001", "cust_002"]}]
-        method2_data = [{"customers": ["cust_001", "cust_003"]}]
-
-        collection.add_method("method1", method1_data)
-        collection.add_method("method2", method2_data)
-
-        # The interner should have deduplicated "cust_001"
-        assert collection.interner.len() == 3  # cust_001, cust_002, cust_003
-
-        # Verify the strings are interned correctly
-        assert collection.interner.get_string(0) in {"cust_001", "cust_002", "cust_003"}
-        assert collection.interner.get_string(1) in {"cust_001", "cust_002", "cust_003"}
-        assert collection.interner.get_string(2) in {"cust_001", "cust_002", "cust_003"}
+        assert entity.total_records() == 10000
+        assert len(entity.get_records("large_dataset")) == 10000
+        assert entity.has_dataset("large_dataset")
