@@ -9,3 +9,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
+roaring = "0.10"
+rustc-hash = "2.0"
