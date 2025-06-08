@@ -18,7 +18,7 @@ test-rust:
     @echo "Running Rust unit tests..."
     cd src/rust/entityframe && uv run -- sh -c 'PYO3_PYTHON=$(which python) cargo test --no-default-features'
     @echo "Running cargo check..."
-    cd src/rust/entityframe && cargo check
+    cd src/rust/entityframe && uv run -- cargo check
 
 # Run all tests (Python + Rust)
 test: test-python test-rust
@@ -28,8 +28,8 @@ format:
     uv run ruff format src/
     uv run ruff check src/
     uv run mypy src/python/
-    cd src/rust/entityframe && cargo fmt
-    cd src/rust/entityframe && cargo clippy
+    cd src/rust/entityframe && uv run -- cargo fmt
+    cd src/rust/entityframe && uv run -- cargo clippy
 
 # Clean build artifacts
 clean:
