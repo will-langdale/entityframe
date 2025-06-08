@@ -1,122 +1,233 @@
-🍏 EntityFrame rethinks how we evaluate entity resolution methods by treating entities as what they truly are: **collections of records across multiple datasets**, not just pairs of records.
+# EntityFrame
 
-## The Problem
+**High-performance entity resolution evaluation for Python**
 
-When comparing tools like Splink vs RecordLinkage vs Dedupe, we're forced into a lossy abstraction where entities become mere pairs of records. But **entities aren't pairs - they're sets of sets**.
+EntityFrame treats entities as what they truly are: collections of records across multiple datasets. Compare entity resolution methods efficiently using set operations rather than pairwise record comparisons.
 
-The question isn't "do these two records match?" but rather "how well do these two methods agree on what constitutes the entity 'Michael'?"
-
-## The Solution
-
-EntityFrame provides a **three-layer architecture** optimised for entity-centric evaluation at scale:
-
-### Layer 1: String Interning
-
-Every unique record ID gets mapped to a compact integer exactly once, creating a global string pool that enables massive memory savings and faster comparisons.
-
-### Layer 2: Roaring Bitmaps
-
-Record ID sets become compressed bitmaps optimised for the set operations that drive entity resolution evaluation. Perfect for the sparse/clustered patterns typical in entity data.
-
-### Layer 3: Entity Hashing
-
-Each entity gets a deterministic hash based on its complete set-of-sets structure, enabling fast deduplication, lookup, and caching.
-
-## Core Concepts
-
-An entity is a mathematical object: a mapping from dataset names to sets of record identifiers.
-
-```python
-Entity("Michael") = {
-    "customers": {"cust_2023_001", "cust_2023_045"},
-    "transactions": {"txn_555", "txn_777", "txn_999"}, 
-    "addresses": {"addr_chicago_123"}
-}
-```
-
-Entity resolution evaluation becomes **pure set theory**: comparing how different methods partition the same universe of records into entity-sets.
-
-## Quick Start
+## Quickstart
 
 ```python
 import entityframe as ef
 
-# Create entities from your resolution results
-entities = ef.EntityCollection()
+# Your entity resolution results from two different methods
+splink_results = [
+    {"customers": ["cust_001", "cust_002"], "transactions": ["txn_100"]},
+    {"customers": ["cust_003"], "transactions": ["txn_101", "txn_102"]},
+]
 
-# Add entities from different methods
-entities.add_method("splink", splink_results)
-entities.add_method("recordlinkage", recordlinkage_results)
+dedupe_results = [
+    {"customers": ["cust_001"], "transactions": ["txn_100"]},
+    {"customers": ["cust_002", "cust_003"], "transactions": ["txn_101", "txn_102"]},
+]
 
-# Compare methods at entity level
-comparison = entities.compare_methods("splink", "recordlinkage")
+# Create a frame with known datasets (optional - add_method auto-declares)
+frame = ef.EntityFrame.with_datasets(["customers", "transactions"])
 
-# Find high-disagreement cases for debugging
-problematic = comparison.filter(jaccard < 0.5)
+# Add both collections
+frame.add_method("splink", splink_results)
+frame.add_method("dedupe", dedupe_results)
+
+# Compare how well the methods agree
+comparisons = frame.compare_collections("splink", "dedupe")
+avg_similarity = sum(c['jaccard'] for c in comparisons) / len(comparisons)
+print(f"Average agreement: {avg_similarity:.2f}")
 ```
+
+## What is EntityFrame?
+
+Traditional entity resolution evaluation compares pairs of records. EntityFrame compares **entities as complete objects** - collections of records that span multiple datasets.
+
+Instead of asking "do these two records match?", EntityFrame asks "how well do these two methods agree on what constitutes this entity?"
+
+## Core concepts
+
+* `Entity`: A collection of record IDs across multiple datasets
+
+```python
+# Entity representing "Michael Smith"
+{
+    "customers": ["cust_001", "cust_045"],
+    "transactions": ["txn_555", "txn_777"], 
+    "addresses": ["addr_123"]
+}
+```
+
+* `EntityCollection`: Entities from one method (like pandas Series)  
+* `EntityFrame`: Multiple collections for comparison (like pandas DataFrame)
 
 ## Installation
 
-```bash
-# Install from PyPI (when available)
+```shell
+# From PyPI (when available)
 pip install entityframe
 
-# Or build from source
+# From source
 git clone https://github.com/yourusername/entityframe
 cd entityframe
-just install
-just build
+just install && just build
+```
+
+## Simple example
+
+```python
+import entityframe as ef
+
+# Method 1: Conservative clustering
+method1 = [
+    {"customers": ["john_1"], "emails": ["john@email.com"]},
+    {"customers": ["john_2"], "emails": ["j.smith@work.com"]},
+]
+
+# Method 2: Aggressive clustering  
+method2 = [
+    {"customers": ["john_1", "john_2"], "emails": ["john@email.com", "j.smith@work.com"]},
+]
+
+# Create frame and declare datasets upfront for efficiency
+frame = ef.EntityFrame()
+frame.declare_dataset("customers")
+frame.declare_dataset("emails")
+
+# Add the collections
+frame.add_method("conservative", method1)
+frame.add_method("aggressive", method2)
+
+# See how they differ
+results = frame.compare_collections("conservative", "aggressive")
+for result in results:
+    print(f"Entity {result['entity_index']}: {result['jaccard']:.2f} similarity")
+```
+
+## Working with individual entities
+
+```python
+# Create an entity manually
+entity = ef.Entity()
+entity.add_records("customers", [1, 2, 3])
+entity.add_records("transactions", [100, 101])
+
+# Query the entity
+print(f"Total records: {entity.total_records()}")
+print(f"Customer records: {entity.get_records('customers')}")
+print(f"Has transactions: {entity.has_dataset('transactions')}")
+
+# Compare two entities
+other_entity = ef.Entity()
+other_entity.add_records("customers", [2, 3, 4])
+similarity = entity.jaccard_similarity(other_entity)
+print(f"Jaccard similarity: {similarity:.2f}")
+```
+
+## Collection modes
+
+EntityCollection supports two modes:
+
+**Standalone mode** (own interner):
+```python
+collection = ef.EntityCollection("splink")
+collection.add_entities_standalone(entity_data)
+# Collection manages its own string interning
+```
+
+**Shared interner mode** (cross-collection comparison):
+```python
+collection1 = ef.EntityCollection("splink")
+collection2 = ef.EntityCollection("dedupe")
+interner = ef.StringInterner()
+
+# Both collections use the same interner for consistent dataset IDs
+interner = collection1.add_entities(data1, interner)
+interner = collection2.add_entities(data2, interner)
+
+# Now collections can be meaningfully compared
+comparisons = collection1.compare_with(collection2)
+```
+
+**Frame mode** (centralized management):
+```python
+frame = ef.EntityFrame()
+frame.add_method("splink", entity_data)  # Frame manages all interning
+```
+
+## API overview
+
+### `EntityFrame`
+
+```python
+frame = ef.EntityFrame()
+frame = ef.EntityFrame.with_datasets(["ds1", "ds2"])  # Pre-declare datasets (recommended)
+frame.declare_dataset(name)                      # Declare single dataset
+frame.add_method(name, entity_data)              # Add collection results (auto-declares datasets)
+frame.add_collection(name, collection)           # Add pre-built collection  
+frame.compare_collections(name1, name2)          # Compare two collections
+frame.get_collection(name)                       # Get specific collection
+frame.get_collection_names()                     # List all collections
+frame.total_entities()                           # Count total entities
+```
+
+### `EntityCollection`
+
+```python
+collection = ef.EntityCollection("process_name")
+collection.add_entities_standalone(entity_data)  # Add entities (standalone mode)
+collection.add_entities(entity_data, interner)   # Add entities (shared interner mode)
+collection.get_entity(index)                     # Get entity by index
+collection.get_entities()                        # Get all entities
+collection.entity_has_dataset(index, name)       # Check if entity has dataset
+collection.len()                                 # Number of entities
+collection.compare_with(other_collection)        # Compare collections
+collection.interner                              # Access collection's interner
+```
+
+### `Entity`
+
+```python
+entity = ef.Entity()
+entity.add_record(dataset, record_id)           # Add single record
+entity.add_records(dataset, record_ids)         # Add multiple records
+entity.get_records(dataset)                     # Get records for dataset
+entity.jaccard_similarity(other_entity)         # Compare entities
+entity.total_records()                          # Count all records
+```
+
+## Data format
+
+EntityFrame expects your entity resolution results as a list of dictionaries:
+
+```python
+entity_data = [
+    {
+        "dataset1": ["record_1", "record_2"],    # Records from dataset1
+        "dataset2": ["record_10"],               # Records from dataset2
+    },
+    {
+        "dataset1": ["record_3"],
+        "dataset3": ["record_20", "record_21"],  # Different datasets per entity
+    },
+    # ... more entities
+]
 ```
 
 ## Performance
 
 EntityFrame is built for scale:
-- **Memory efficiency**: 10-100x smaller than naive string sets
-- **Speed**: Set operations use SIMD-optimised roaring bitmaps
-- **Cache friendly**: Integer operations with excellent locality
 
-Evaluate millions of entities across multiple methods in minutes, not hours.
+- **String interning**: 10-100x memory reduction
+- **Roaring bitmaps**: SIMD-optimized set operations  
+- **Rust core**: High-performance implementation
+- **Shared memory**: Multiple methods share string pools
 
-## Architecture
-
-EntityFrame is a hybrid Python/Rust package using PyO3 bindings:
-
-```
-src/
-├── python/entityframe/    # Python API with DataFrame-like interface
-├── rust/entityframe/      # High-performance core in Rust
-└── tests/                # Comprehensive test suite
-```
-
-The Rust core handles the computationally intensive operations while Python provides a familiar, DataFrame-like API that data scientists already understand.
+Handle millions of entities efficiently.
 
 ## Development
 
-This project uses `just` as a command runner and `uv` for Python dependency management:
-
 ```bash
-just install     # Install all dependencies
-just build       # Build the Rust extension
-just test-all    # Run Python and Rust tests
-just format       # Format and lint all code
+just install    # Install dependencies
+just build      # Build Rust extension  
+just test-all   # Run all tests
+just format     # Format code
 ```
-
-## Why EntityFrame?
-
-- **Entity-native evaluation**: Compare methods on actual entity structure, not proxy metrics
-- **Massive scale**: Handle millions of entities efficiently
-- **Method agnostic**: Works with any entity resolution tool's output
-- **Familiar API**: DataFrame-like interface for data scientists
-- **Debugging focused**: Instantly drill down to specific disagreements
 
 ## License
 
-Licensed under either of
-
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
-
-at your option.
-
-## Contributing
-
-We welcome contributions! Please see our [contributing guidelines](CONTRIBUTING.md) for details.
+MIT License
