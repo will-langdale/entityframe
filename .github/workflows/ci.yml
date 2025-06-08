@@ -42,6 +42,6 @@ jobs:
     - name: Run tests
       run: just test-all
     
-    - name: Check formatting (Ubuntu only)
+    - name: Format and lint (Ubuntu only)
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
-      run: just check
+      run: just format
