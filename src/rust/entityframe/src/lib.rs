@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
-use rustc_hash::FxHashMap;
 use roaring::RoaringBitmap;
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ impl StringInterner {
         if let Some(&id) = self.string_to_id.get(s) {
             return id;
         }
-        
+
         let arc_str: Arc<str> = Arc::from(s);
         let id = self.strings.len() as u32;
         self.strings.push(arc_str.clone());
@@ -72,16 +72,14 @@ impl Entity {
     fn add_record(&mut self, dataset: &str, record_id: u32) {
         self.datasets
             .entry(dataset.to_string())
-            .or_insert_with(RoaringBitmap::new)
+            .or_default()
             .insert(record_id);
     }
 
     /// Add multiple record IDs to a dataset.
     fn add_records(&mut self, dataset: &str, record_ids: Vec<u32>) {
-        let bitmap = self.datasets
-            .entry(dataset.to_string())
-            .or_insert_with(RoaringBitmap::new);
-        
+        let bitmap = self.datasets.entry(dataset.to_string()).or_default();
+
         for id in record_ids {
             bitmap.insert(id);
         }
@@ -164,20 +162,20 @@ mod tests {
     #[test]
     fn test_string_interner() {
         let mut interner = StringInterner::new();
-        
+
         // Test interning
         let id1 = interner.intern("hello");
         let id2 = interner.intern("world");
         let id3 = interner.intern("hello"); // Should return same ID
-        
+
         assert_eq!(id1, 0);
         assert_eq!(id2, 1);
         assert_eq!(id3, 0); // Same as id1
-        
+
         // Test retrieval
         assert_eq!(interner.get_string(id1).unwrap(), "hello");
         assert_eq!(interner.get_string(id2).unwrap(), "world");
-        
+
         // Test length
         assert_eq!(interner.len(), 2);
         assert!(!interner.is_empty());
@@ -186,24 +184,24 @@ mod tests {
     #[test]
     fn test_entity() {
         let mut entity = Entity::new();
-        
+
         // Test adding records
         entity.add_record("customers", 1);
         entity.add_record("customers", 2);
         entity.add_records("transactions", vec![10, 11, 12]);
-        
+
         // Test retrieval
         let customers = entity.get_records("customers").unwrap();
         assert_eq!(customers, vec![1, 2]);
-        
+
         let transactions = entity.get_records("transactions").unwrap();
         assert_eq!(transactions, vec![10, 11, 12]);
-        
+
         // Test datasets
         let datasets = entity.get_datasets();
         assert!(datasets.contains(&"customers".to_string()));
         assert!(datasets.contains(&"transactions".to_string()));
-        
+
         // Test total records
         assert_eq!(entity.total_records(), 5);
     }
@@ -213,15 +211,15 @@ mod tests {
         let mut entity1 = Entity::new();
         entity1.add_records("customers", vec![1, 2, 3]);
         entity1.add_records("transactions", vec![10, 11]);
-        
+
         let mut entity2 = Entity::new();
         entity2.add_records("customers", vec![2, 3, 4]);
         entity2.add_records("transactions", vec![11, 12]);
-        
+
         // Intersection: customers {2, 3}, transactions {11} = 3 total
         // Union: customers {1, 2, 3, 4}, transactions {10, 11, 12} = 7 total
         // Jaccard = 3/7 ≈ 0.428
         let similarity = entity1.jaccard_similarity(&entity2);
-        assert!((similarity - 3.0/7.0).abs() < 1e-10);
+        assert!((similarity - 3.0 / 7.0).abs() < 1e-10);
     }
 }

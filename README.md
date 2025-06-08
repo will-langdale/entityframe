@@ -98,7 +98,7 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 just install     # Install all dependencies
 just build       # Build the Rust extension
 just test-all    # Run Python and Rust tests
-just check       # Format and lint all code
+just format       # Format and lint all code
 ```
 
 ## Why EntityFrame?

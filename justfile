@@ -22,25 +22,13 @@ test-rust:
 # Run all tests
 test-all: test test-rust
 
-# Format Python code
-fmt:
+# Format and lint all code (Python + Rust)
+format:
     uv run ruff format src/
-
-# Lint Python code
-lint:
     uv run ruff check src/
     uv run mypy src/python/
-
-# Format Rust code
-fmt-rust:
     cd src/rust/entityframe && cargo fmt
-
-# Lint Rust code  
-lint-rust:
     cd src/rust/entityframe && cargo clippy
-
-# Format and lint all code
-check: fmt lint fmt-rust lint-rust
 
 # Clean build artifacts
 clean:

@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional
 class EntityCollection:
     """High-level API for managing and comparing entity resolution methods."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.interner = StringInterner()
         self.methods: Dict[str, List[Entity]] = {}
 
@@ -74,7 +74,6 @@ class EntityCollection:
             )
 
         return results
-
 
 
 __all__ = [
