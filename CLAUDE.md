@@ -54,19 +54,15 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 - `just test`: Run Python tests
 - `just test-rust`: Run Rust checks (PyO3 tests need Python context)
 - `just test-all`: Run both Python and Rust tests
-- `just check`: Format and lint all code (Python + Rust)
+- `just format`: Format and lint all code (Python + Rust)
 - `just clean`: Remove all build artifacts
-
-For individual operations:
-- `just fmt` / `just fmt-rust`: Format Python/Rust code
-- `just lint` / `just lint-rust`: Lint Python/Rust code
 
 ## Development Workflow
 
 1. Install dependencies: `just install`
 2. Build the project: `just build`
 3. Run tests: `just test-all`
-4. Check formatting/linting: `just check`
+4. Check formatting/linting: `just format`
 
 ## Project Structure Notes
 

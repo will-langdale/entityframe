@@ -1,0 +1,155 @@
+name: Publish to PyPI
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Get version from tag
+      id: get-version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Version: $VERSION"
+    
+    - name: Update pyproject.toml version
+      run: |
+        VERSION=${{ steps.get-version.outputs.version }}
+        sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
+    
+    - name: Update Rust Cargo.toml version
+      run: |
+        VERSION=${{ steps.get-version.outputs.version }}
+        sed -i "s/^version = .*/version = \"$VERSION\"/" src/rust/entityframe/Cargo.toml
+    
+    - name: Upload updated files
+      uses: actions/upload-artifact@v4
+      with:
+        name: updated-configs
+        path: |
+          pyproject.toml
+          src/rust/entityframe/Cargo.toml
+
+  build-wheels:
+    needs: update-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+          - os: ubuntu-latest
+            target: s390x-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: ppc64le-unknown-linux-gnu
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+          # macOS
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download updated configs
+      uses: actions/download-artifact@v4
+      with:
+        name: updated-configs
+    
+    - name: Move updated configs to correct locations
+      shell: bash
+      run: |
+        mv updated-configs/pyproject.toml .
+        mv updated-configs/Cargo.toml src/rust/entityframe/
+    
+    - name: Build wheels
+      uses: PyO3/maturin-action@v1
+      with:
+        target: ${{ matrix.target }}
+        args: --release --out dist --find-interpreter
+        sccache: 'true'
+        manylinux: auto
+    
+    - name: Upload wheels
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.target }}
+        path: dist
+
+  build-sdist:
+    needs: update-version
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download updated configs
+      uses: actions/download-artifact@v4
+      with:
+        name: updated-configs
+    
+    - name: Move updated configs to correct locations
+      run: |
+        mv updated-configs/pyproject.toml .
+        mv updated-configs/Cargo.toml src/rust/entityframe/
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        version: "latest"
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install maturin
+      run: uv tool install maturin
+    
+    - name: Build source distribution
+      run: uv tool run maturin sdist
+    
+    - name: Upload sdist
+      uses: actions/upload-artifact@v4
+      with:
+        name: sdist
+        path: dist/*.tar.gz
+
+  publish:
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: dist
+        merge-multiple: true
+    
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
