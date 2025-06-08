@@ -51,7 +51,6 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 
 - `just install`: Install all dependencies (Python + dev tools)
 - `just build`: Build the Rust extension module
-- `just dev`: Build and run hello world example
 - `just test`: Run Python tests
 - `just test-rust`: Run Rust checks (PyO3 tests need Python context)
 - `just test-all`: Run both Python and Rust tests

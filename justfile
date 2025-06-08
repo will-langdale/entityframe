@@ -48,10 +48,3 @@ clean:
     rm -rf target/
     find src/ -name "*.pyc" -delete
     find src/ -name "__pycache__" -delete
-
-# Run hello world example
-hello:
-    uv run python -c "import entityframe; print(entityframe.hello_python()); print(entityframe.hello_rust())"
-
-# Development mode - build and run hello
-dev: build hello
