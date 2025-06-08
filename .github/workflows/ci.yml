@@ -23,6 +23,11 @@ jobs:
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
     
+    - name: Configure Python for PyO3 (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        echo "LD_LIBRARY_PATH=$(python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")" >> $GITHUB_ENV
+    
     - name: Install just
       uses: extractions/setup-just@v2
     
@@ -48,6 +53,10 @@ jobs:
     
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
+    
+    - name: Configure Python for PyO3
+      run: |
+        echo "LD_LIBRARY_PATH=$(python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")" >> $GITHUB_ENV
     
     - name: Install just
       uses: extractions/setup-just@v2
