@@ -80,63 +80,16 @@ jobs:
     
     - name: Build wheels
       run: uv tool run cibuildwheel --output-dir wheelhouse
+      env:
+        CIBW_SKIP: pp* cp36-* cp37-* cp38-*
+        CIBW_BUILD_VERBOSITY: 1
+        CIBW_BEFORE_BUILD: "uv tool install maturin"
+        CIBW_BUILD_FRONTEND: "build"
     
     - uses: actions/upload-artifact@v4
       with:
         path: ./wheelhouse/*.whl
         name: wheel-builds-${{ matrix.os }}
-
-  build-exotic-wheels:
-    name: Build wheels on exotic architectures
-    runs-on: ubuntu-latest
-    needs: update-version
-    environment: release
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [ppc64le, s390x, aarch64]
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Download pyproject.toml
-      uses: actions/download-artifact@v4
-      with:
-        name: pyproject
-        path: .
-    
-    - name: Download Cargo.toml
-      uses: actions/download-artifact@v4
-      with:
-        name: cargo-toml
-        path: src/rust/entityframe/
-    
-    - name: Install uv and Python
-      uses: astral-sh/setup-uv@v5
-      with:
-        python-version: '3.10'
-    
-    - name: Set up Rust
-      uses: actions-rust-lang/setup-rust-toolchain@v1
-    
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      with:
-        platforms: all
-    
-    - name: Install cibuildwheel
-      run: uv tool install cibuildwheel
-    
-    - name: Build wheels
-      run: uv tool run cibuildwheel --output-dir wheelhouse
-      env:
-        CIBW_ARCHS_LINUX: ${{ matrix.arch }}
-        CIBW_SKIP: cp36-* cp37-* cp38-* pp* *musl*
-    
-    - uses: actions/upload-artifact@v4
-      with:
-        path: ./wheelhouse/*.whl
-        name: wheel-builds-${{ matrix.arch }}
 
   build-sdist:
     name: Build source distribution
@@ -162,7 +115,7 @@ jobs:
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v5
       with:
-        python-version: '3.10'
+        python-version: '3.13'
     
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -182,7 +135,7 @@ jobs:
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [build-wheels, build-exotic-wheels, build-sdist]
+    needs: [build-wheels, build-sdist]
     environment: release
     permissions:
       id-token: write
