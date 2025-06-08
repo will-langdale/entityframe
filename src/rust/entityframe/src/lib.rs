@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use roaring::RoaringBitmap;
 use rustc_hash::FxHashMap;
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Arc;
 
 /// String interning for efficient record ID storage and lookup.
@@ -24,15 +24,25 @@ impl StringInterner {
 
     /// Intern a string and return its ID.
     fn intern(&mut self, s: &str) -> u32 {
-        if let Some(&id) = self.string_to_id.get(s) {
-            return id;
+        // Use entry API to avoid double hashing
+        let next_id = self.strings.len() as u32;
+        match self.string_to_id.entry(Arc::from(s)) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let arc_str = entry.key().clone();
+                self.strings.push(arc_str);
+                *entry.insert(next_id)
+            }
         }
+    }
 
-        let arc_str: Arc<str> = Arc::from(s);
-        let id = self.strings.len() as u32;
-        self.strings.push(arc_str.clone());
-        self.string_to_id.insert(arc_str, id);
-        id
+    /// Create interner with pre-allocated capacity for better performance
+    #[staticmethod]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            strings: Vec::with_capacity(capacity),
+            string_to_id: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
+        }
     }
 
     /// Get the string for a given ID.
@@ -78,13 +88,12 @@ impl Entity {
             .insert(record_id);
     }
 
-    /// Add multiple record IDs to a dataset.
+    /// Add multiple record IDs to a dataset efficiently using bulk insertion.
     fn add_records(&mut self, dataset: &str, record_ids: Vec<u32>) {
         let bitmap = self.datasets.entry(dataset.to_string()).or_default();
 
-        for id in record_ids {
-            bitmap.insert(id);
-        }
+        // Use RoaringBitmap's bulk insertion method for better performance
+        bitmap.extend(&record_ids);
     }
 
     /// Get record IDs for a dataset as a list.
@@ -115,29 +124,23 @@ impl Entity {
         let mut union_size = 0u64;
         let mut intersection_size = 0u64;
 
-        // Get all unique dataset names
-        let mut all_datasets: std::collections::HashSet<&String> = std::collections::HashSet::new();
-        all_datasets.extend(self.datasets.keys());
-        all_datasets.extend(other.datasets.keys());
+        // Process datasets from self first
+        for (dataset, self_bitmap) in &self.datasets {
+            if let Some(other_bitmap) = other.datasets.get(dataset) {
+                // Both entities have this dataset
+                intersection_size += (self_bitmap & other_bitmap).len();
+                union_size += (self_bitmap | other_bitmap).len();
+            } else {
+                // Only self has this dataset
+                union_size += self_bitmap.len();
+            }
+        }
 
-        for dataset in all_datasets {
-            let self_bitmap = self.datasets.get(dataset);
-            let other_bitmap = other.datasets.get(dataset);
-
-            match (self_bitmap, other_bitmap) {
-                (Some(a), Some(b)) => {
-                    intersection_size += (a & b).len();
-                    union_size += (a | b).len();
-                }
-                (Some(a), None) => {
-                    union_size += a.len();
-                }
-                (None, Some(b)) => {
-                    union_size += b.len();
-                }
-                (None, None) => {
-                    // Both empty for this dataset, no contribution
-                }
+        // Process remaining datasets from other (that self doesn't have)
+        for (dataset, other_bitmap) in &other.datasets {
+            if !self.datasets.contains_key(dataset) {
+                // Only other has this dataset
+                union_size += other_bitmap.len();
             }
         }
 
@@ -167,21 +170,35 @@ impl EntityCollection {
         }
     }
 
+    /// Create EntityCollection with pre-allocated capacity for better performance.
+    #[staticmethod]
+    fn with_capacity(process_name: String, capacity: usize) -> Self {
+        Self {
+            entities: Vec::with_capacity(capacity),
+            process_name,
+        }
+    }
+
     /// Add entities from this process's output, using a shared interner
     fn add_entities(
         &mut self,
         entity_data: Vec<HashMap<String, Vec<String>>>,
         interner: &mut StringInterner,
     ) {
+        // Pre-allocate space for entities
+        self.entities.reserve(entity_data.len());
+
         for entity_dict in entity_data {
             let mut entity = Entity::new();
 
             for (dataset, record_ids) in entity_dict {
+                // Pre-allocate the interned_ids vector
+                let mut interned_ids = Vec::with_capacity(record_ids.len());
+
                 // Intern the record ID strings and convert to u32 IDs
-                let interned_ids: Vec<u32> = record_ids
-                    .into_iter()
-                    .map(|record_id| interner.intern(&record_id))
-                    .collect();
+                for record_id in record_ids {
+                    interned_ids.push(interner.intern(&record_id));
+                }
 
                 entity.add_records(&dataset, interned_ids);
             }
@@ -235,7 +252,8 @@ impl EntityCollection {
         }
 
         Python::with_gil(|py| {
-            let mut comparisons = Vec::new();
+            // Pre-allocate the comparisons vector
+            let mut comparisons = Vec::with_capacity(self.entities.len());
 
             for (i, (entity1, entity2)) in
                 self.entities.iter().zip(other.entities.iter()).enumerate()
@@ -292,7 +310,9 @@ impl EntityFrame {
 
     /// Create and add a collection with entity data in one step
     fn add_method(&mut self, method_name: &str, entity_data: Vec<HashMap<String, Vec<String>>>) {
-        let mut collection = EntityCollection::new(method_name);
+        // Use with_capacity to pre-allocate based on entity count
+        let mut collection =
+            EntityCollection::with_capacity(method_name.to_string(), entity_data.len());
         collection.add_entities(entity_data, &mut self.interner);
         self.collections.insert(method_name.to_string(), collection);
     }

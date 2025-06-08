@@ -3,7 +3,6 @@ Performance tests demonstrating EntityFrame can handle massive scale efficiently
 """
 
 import time
-import pytest
 from entityframe import EntityFrame
 
 
@@ -91,7 +90,9 @@ class TestPerformance:
         # Check string interning efficiency
         interner_size = frame.interner_size()
         # Note: We generate unique strings per method, so no compression expected
-        total_generated_strings = num_entities * records_per_entity * 2  # Rough estimate
+        total_generated_strings = (
+            num_entities * records_per_entity * 2
+        )  # Rough estimate
 
         print("📈 Statistics:")
         print(f"   • Total entities: {frame.total_entities():,}")
