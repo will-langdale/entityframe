@@ -3,7 +3,6 @@
 # Install development dependencies
 install:
     uv sync
-    uv add --dev maturin pytest ruff mypy
 
 # Build the Rust extension
 build:
@@ -16,7 +15,7 @@ test-python:
 # Run Rust tests (pure Rust unit tests + cargo check)
 test-rust:
     @echo "Running Rust unit tests..."
-    cd src/rust/entityframe && uv run -- sh -c 'PYO3_PYTHON=$(which python) cargo test --no-default-features'
+    cd src/rust/entityframe && uv run -- cargo test --no-default-features
     @echo "Running cargo check..."
     cd src/rust/entityframe && uv run -- cargo check
 
