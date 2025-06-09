@@ -22,13 +22,7 @@ jobs:
     
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
-    
-    - name: Set PyO3 environment
-      run: |
-        PYTHON_PATH=$(uv run which python)
-        echo "PYO3_PYTHON=${PYTHON_PATH}" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=$(dirname ${PYTHON_PATH})/../lib" >> $GITHUB_ENV
-    
+  
     - name: Install just
       uses: extractions/setup-just@v2
     
@@ -37,9 +31,17 @@ jobs:
     
     - name: Build project
       run: just build
+
+    - name: Set PyO3 environment
+      run: uv pip install -e .
+      env:
+        RUST_BACKTRACE: 1
     
-    - name: Run tests
-      run: just test
+    - name: Run Python tests
+      run: uv run pytest src/tests/
+    
+    - name: Run Rust tests
+      run: cd src/rust/entityframe && cargo test --no-default-features
 
   format-and-lint:
     runs-on: ubuntu-latest
@@ -55,17 +57,16 @@ jobs:
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
     
-    - name: Set PyO3 environment
-      run: |
-        PYTHON_PATH=$(uv run which python)
-        echo "PYO3_PYTHON=${PYTHON_PATH}" >> $GITHUB_ENV
-        echo "LD_LIBRARY_PATH=$(dirname ${PYTHON_PATH})/../lib" >> $GITHUB_ENV
-    
     - name: Install just
       uses: extractions/setup-just@v2
     
     - name: Install dependencies
       run: just install
+
+    - name: Set PyO3 environment
+      run: uv pip install -e .
+      env:
+        RUST_BACKTRACE: 1
     
     - name: Format and lint
       run: just format
