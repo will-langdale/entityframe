@@ -96,7 +96,7 @@ class TestPerformance:
 
         print("📈 Statistics:")
         print(f"   • Total entities: {frame.total_entities():,}")
-        print(f"   • Unique strings: {interner_size:,}")
+        print(f"   • Unique strings (datasets + records): {interner_size:,}")
         print(f"   • Estimated total strings generated: {total_generated_strings:,}")
 
         # Test entity access performance
@@ -166,7 +166,7 @@ class TestPerformance:
         assert entities_per_second > 1000, (
             f"Should process >1000 entities/second, got {entities_per_second:.0f}"
         )
-        assert interner_size > 0, "String interner should contain strings"
+        assert interner_size > 0, "Interner should contain strings"
         assert interner_size > 1_000_000, (
             f"Should have >1M unique strings for this test, got {interner_size:,}"
         )
@@ -214,17 +214,18 @@ class TestPerformance:
 
         # Calculate theoretical vs actual string count
         total_records = num_entities * 3 * 2  # 3 records per entity, 2 methods
-        unique_strings = frame.interner_size()
-        theoretical_without_interning = total_records
+        total_datasets = 2  # customers, transactions
+        interner_size = frame.interner_size()
+        theoretical_without_interning = total_records + total_datasets
 
-        memory_savings = theoretical_without_interning / unique_strings
-        overlap_efficiency = 1 - (unique_strings / theoretical_without_interning)
+        memory_savings = theoretical_without_interning / interner_size
+        overlap_efficiency = 1 - (interner_size / theoretical_without_interning)
 
         print("📊 Memory efficiency results:")
         print(
             f"   • Theoretical strings (no interning): {theoretical_without_interning:,}"
         )
-        print(f"   • Actual unique strings (with interning): {unique_strings:,}")
+        print(f"   • Actual unique strings (with interning): {interner_size:,}")
         print(f"   • Memory savings: {memory_savings:.1f}x")
         print(f"   • Space efficiency: {overlap_efficiency:.1%}")
 

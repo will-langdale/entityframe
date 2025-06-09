@@ -49,3 +49,7 @@ disallow_untyped_defs = true
 [[tool.mypy.overrides]]
 module = "entityframe._rust"
 ignore_missing_imports = true
+
+[tool.uv]
+# Prevent uv sync from building the package - use just build instead
+package = false

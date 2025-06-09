@@ -5,20 +5,77 @@ on:
     branches: [ main ]
 
 jobs:
-  test-and-format:
+  test-python:
+    name: test ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     
     steps:
     - uses: actions/checkout@v4
     
     - name: Install uv and Python
-      uses: astral-sh/setup-uv@v5
+      uses: astral-sh/setup-uv@v6
       with:
         python-version: ${{ matrix.python-version }}
+    
+    - name: Set up Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+  
+    - name: Install just
+      uses: extractions/setup-just@v2
+    
+    - name: Install dependencies
+      run: just install
+    
+    - name: Build project
+      run: just build
+    
+    - name: Run Python tests
+      run: just test-python
+
+  test-os:
+    name: test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+  
+    - name: Install uv
+      uses: astral-sh/setup-uv@v6
+    
+    - name: Install dependencies
+      run: uv sync
+
+    - name: Build project
+      run: uv pip install -e .
+      env:
+        RUST_BACKTRACE: 1
+
+    - name: Run Python tests
+      run: uv run pytest
+    
+    - name: Run Rust tests
+      run: cargo test --no-default-features
+
+  format-and-lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install uv and Python
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: "3.13"
     
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -32,9 +89,5 @@ jobs:
     - name: Build project
       run: just build
     
-    - name: Run tests
-      run: just test-all
-    
-    - name: Format and lint (Ubuntu only)
-      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.13'
+    - name: Format and lint
       run: just format
