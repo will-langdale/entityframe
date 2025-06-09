@@ -5,12 +5,12 @@ on:
     branches: [ main ]
 
 jobs:
-  python-tests:
-    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
+  test-python:
+    name: test ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest]
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     
     steps:
@@ -29,17 +29,15 @@ jobs:
     
     - name: Install dependencies
       run: just install
-
-    - name: Build extension
-      run: uv pip install -e .
-      env:
-        RUST_BACKTRACE: 1
+    
+    - name: Build project
+      run: just build
     
     - name: Run Python tests
       run: just test-python
 
-  rust-tests:
-    name: Rust tests on ${{ matrix.os }}
+  test-os:
+    name: test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -48,25 +46,25 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Install uv
-      uses: astral-sh/setup-uv@v6
-    
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
   
-    - name: Install just
-      uses: extractions/setup-just@v2
+    - name: Install uv
+      uses: astral-sh/setup-uv@v6
     
     - name: Install dependencies
-      run: just install
+      run: uv sync
 
-    - name: Build extension
+    - name: Build project
       run: uv pip install -e .
       env:
         RUST_BACKTRACE: 1
+
+    - name: Run Python tests
+      run: uv run pytest
     
     - name: Run Rust tests
-      run: just test-rust
+      run: cargo test
 
   format-and-lint:
     runs-on: ubuntu-latest
@@ -87,11 +85,9 @@ jobs:
     
     - name: Install dependencies
       run: just install
-
-    - name: Set PyO3 environment
-      run: uv pip install -e .
-      env:
-        RUST_BACKTRACE: 1
+    
+    - name: Build project
+      run: just build
     
     - name: Format and lint
       run: just format

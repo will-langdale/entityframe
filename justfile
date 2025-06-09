@@ -10,14 +10,13 @@ build:
 
 # Run Python tests
 test-python:
-    uv run pytest src/tests/
+    uv run pytest
 
-# Run Rust tests (pure Rust unit tests + cargo check)
-test-rust:
-    @echo "Running Rust unit tests..."
-    cd src/rust/entityframe && uv run -- cargo test --no-default-features
-    @echo "Running cargo check..."
-    cd src/rust/entityframe && uv run -- cargo check
+# Run Rust tests (pure Rust unit tests)
+test-rust: build
+    #!/usr/bin/env bash
+    export PYO3_PYTHON=$(uv run which python)
+    cargo test --no-default-features
 
 # Run all tests (Python + Rust)
 test: test-python test-rust
@@ -27,12 +26,12 @@ format:
     uv run ruff format src/
     uv run ruff check src/
     uv run mypy src/python/
-    cd src/rust/entityframe && uv run -- cargo fmt
-    cd src/rust/entityframe && uv run -- cargo clippy
+    cargo fmt
+    cargo clippy
 
 # Clean build artifacts
 clean:
-    cd src/rust/entityframe && cargo clean
+    cargo clean
     rm -rf target/
     find src/ -name "*.pyc" -delete
     find src/ -name "__pycache__" -delete
