@@ -5,7 +5,8 @@ on:
     branches: [ main ]
 
 jobs:
-  test:
+  python-tests:
+    name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -29,13 +30,42 @@ jobs:
     - name: Install dependencies
       run: just install
 
-    - name: Set PyO3 environment
+    - name: Build extension
       run: uv pip install -e .
       env:
         RUST_BACKTRACE: 1
     
     - name: Run Python tests
       run: uv run pytest src/tests/
+
+  rust-tests:
+    name: Rust tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install uv and Python
+      uses: astral-sh/setup-uv@v5
+      with:
+        python-version: "3.13"
+    
+    - name: Set up Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+  
+    - name: Install just
+      uses: extractions/setup-just@v2
+    
+    - name: Install dependencies
+      run: just install
+
+    - name: Build extension
+      run: uv pip install -e .
+      env:
+        RUST_BACKTRACE: 1
     
     - name: Run Rust tests
       run: cd src/rust/entityframe && cargo test --no-default-features
