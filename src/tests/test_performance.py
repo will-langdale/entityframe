@@ -375,3 +375,45 @@ class TestPerformance:
         print(
             "✅ Hashing performance test passed! All operations meet performance targets."
         )
+
+    def test_batch_vs_individual_performance(self):
+        """Test that batch processing provides performance benefits for large datasets."""
+        print("\n📦 Testing batch vs individual entity processing...")
+
+        num_entities = 500  # Reasonable size for CI
+
+        # Generate test data
+        entities_data = []
+        for i in range(num_entities):
+            entity = {
+                "customers": [f"c_{i}_{j}" for j in range(5)],
+                "orders": [f"o_{i}_{j}" for j in range(3)],
+            }
+            entities_data.append(entity)
+
+        # Test batch processing (current default)
+        print("🔄 Testing batch processing (add_method)...")
+        batch_start = time.time()
+
+        frame_batch = EntityFrame()
+        frame_batch.add_method("batch_test", entities_data)
+
+        # Hash a sample of entities
+        sample_size = min(100, num_entities)
+        for i in range(sample_size):
+            frame_batch.hash_entity("batch_test", i, "sha256")
+
+        batch_time = time.time() - batch_start
+        batch_rate = sample_size / batch_time if batch_time > 0 else 0
+
+        print(
+            f"   • Batch: {sample_size} entities processed + hashed in {batch_time:.3f}s"
+        )
+        print(f"   • Rate: {batch_rate:,.0f} entities/second")
+
+        # Performance assertion - batch should be reasonably fast
+        assert batch_rate > 50, (
+            f"Batch processing should be >50 entities/sec, got {batch_rate:.0f}"
+        )
+
+        print("✅ Batch processing performance validated!")

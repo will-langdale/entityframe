@@ -361,4 +361,45 @@ mod tests {
         println!("Jaccard: {}", jaccard);
         assert_eq!(jaccard, 0.0);
     }
+
+    #[test]
+    fn test_simplified_hash_functionality() {
+        let mut frame = EntityFrame::new();
+
+        // Create test data
+        let entity_data = vec![
+            {
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["c1".to_string(), "c2".to_string()],
+                );
+                data.insert("orders".to_string(), vec!["o1".to_string()]);
+                data
+            },
+            {
+                let mut data = HashMap::new();
+                data.insert("customers".to_string(), vec!["c3".to_string()]);
+                data.insert(
+                    "orders".to_string(),
+                    vec!["o2".to_string(), "o3".to_string()],
+                );
+                data
+            },
+        ];
+
+        frame.add_method("test", entity_data);
+
+        // Test that all entities have sorted records (since we use optimized batch processing)
+        let collection = frame.get_collection("test").unwrap();
+        let entity1 = collection.get_entity(0).unwrap();
+        let entity2 = collection.get_entity(1).unwrap();
+        assert!(entity1.has_sorted_records());
+        assert!(entity2.has_sorted_records());
+
+        // Test that entity hashing works (basic functionality test)
+        // We'll test hash consistency and differences at the Python test level
+        assert_eq!(frame.collection_count(), 1);
+        assert_eq!(frame.total_entities(), 2);
+    }
 }

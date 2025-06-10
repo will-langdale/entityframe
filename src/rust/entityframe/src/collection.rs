@@ -129,31 +129,46 @@ impl EntityCollection {
         interner: &mut StringInterner,
         dataset_name_to_id: &mut HashMap<String, u32>,
     ) {
+        use roaring::RoaringBitmap;
+
         // Pre-allocate space for entities
         self.entities.reserve(entity_data.len());
 
-        for entity_dict in entity_data {
-            let mut entity = Entity::new();
-
-            for (dataset_name, record_ids) in entity_dict {
-                // Get or create dataset ID using frame's system
-                let dataset_id = if let Some(&existing_id) = dataset_name_to_id.get(&dataset_name) {
-                    existing_id
-                } else {
-                    let new_id = interner.intern(&dataset_name);
+        // Step 1: Process all dataset names first
+        for entity_dict in &entity_data {
+            for dataset_name in entity_dict.keys() {
+                if !dataset_name_to_id.contains_key(dataset_name) {
+                    let new_id = interner.intern(dataset_name);
                     dataset_name_to_id.insert(dataset_name.clone(), new_id);
-                    new_id
-                };
-
-                // Intern all record IDs using shared interner
-                let mut interned_record_ids = Vec::with_capacity(record_ids.len());
-                for record_id in record_ids {
-                    interned_record_ids.push(interner.intern(&record_id));
                 }
+            }
+        }
 
-                entity.add_records_by_id(dataset_id, interned_record_ids);
+        // Step 2: Process each entity using batch processing per dataset
+        for entity_dict in entity_data {
+            let mut dataset_bitmaps = HashMap::new();
+            let mut dataset_sorted_records = HashMap::new();
+
+            // Group records by dataset for batch processing
+            let mut dataset_records_raw = HashMap::new();
+            for (dataset_name, record_ids) in entity_dict {
+                let dataset_id = dataset_name_to_id[&dataset_name];
+                dataset_records_raw.insert(dataset_id, record_ids);
             }
 
+            // Batch intern and sort all records for this entity
+            let batch_results = interner.batch_intern_by_dataset(&dataset_records_raw);
+
+            // Create roaring bitmaps and store sorted order
+            for (dataset_id, (record_ids, sorted_record_ids)) in batch_results {
+                let mut bitmap = RoaringBitmap::new();
+                bitmap.extend(&record_ids);
+                dataset_bitmaps.insert(dataset_id, bitmap);
+                dataset_sorted_records.insert(dataset_id, sorted_record_ids);
+            }
+
+            // Create entity with pre-computed sorted order
+            let entity = Entity::from_sorted_data(dataset_bitmaps, dataset_sorted_records);
             self.entities.push(entity);
         }
     }
@@ -209,5 +224,124 @@ mod tests {
         // Check second entity
         let entity2 = collection.get_entity(1).unwrap();
         assert_eq!(entity2.total_records(), 1); // c3
+    }
+
+    #[test]
+    fn test_batch_processing_with_sorted_records() {
+        let mut collection = EntityCollection::new("batch_test");
+        let mut interner = StringInterner::new();
+        let mut dataset_name_to_id = HashMap::new();
+
+        // Create test data with unsorted records to verify sorting works
+        let entity_data = vec![
+            {
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["c3".to_string(), "c1".to_string(), "c2".to_string()],
+                );
+                data.insert(
+                    "orders".to_string(),
+                    vec!["o2".to_string(), "o1".to_string()],
+                );
+                data
+            },
+            {
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["c5".to_string(), "c4".to_string()],
+                );
+                data
+            },
+        ];
+
+        // Use optimized entity processing
+        collection.add_entities(entity_data, &mut interner, &mut dataset_name_to_id);
+
+        assert_eq!(collection.len(), 2);
+
+        // Check that entities have sorted records cached
+        let entity1 = collection.get_entity(0).unwrap();
+        let entity2 = collection.get_entity(1).unwrap();
+
+        assert!(entity1.has_sorted_records());
+        assert!(entity2.has_sorted_records());
+
+        // Get dataset IDs
+        let customers_id = dataset_name_to_id["customers"];
+        let orders_id = dataset_name_to_id["orders"];
+
+        // Verify sorted order for entity 1
+        if let Some(sorted_customers) = entity1.get_sorted_records(customers_id) {
+            let sorted_strings: Vec<&str> = sorted_customers
+                .iter()
+                .map(|&id| interner.get_string_internal(id).unwrap())
+                .collect();
+            assert_eq!(sorted_strings, vec!["c1", "c2", "c3"]); // Should be alphabetically sorted
+        } else {
+            panic!("Entity 1 should have sorted customers records");
+        }
+
+        if let Some(sorted_orders) = entity1.get_sorted_records(orders_id) {
+            let sorted_strings: Vec<&str> = sorted_orders
+                .iter()
+                .map(|&id| interner.get_string_internal(id).unwrap())
+                .collect();
+            assert_eq!(sorted_strings, vec!["o1", "o2"]); // Should be alphabetically sorted
+        } else {
+            panic!("Entity 1 should have sorted orders records");
+        }
+
+        // Verify sorted order for entity 2
+        if let Some(sorted_customers) = entity2.get_sorted_records(customers_id) {
+            let sorted_strings: Vec<&str> = sorted_customers
+                .iter()
+                .map(|&id| interner.get_string_internal(id).unwrap())
+                .collect();
+            assert_eq!(sorted_strings, vec!["c4", "c5"]); // Should be alphabetically sorted
+        } else {
+            panic!("Entity 2 should have sorted customers records");
+        }
+    }
+
+    #[test]
+    fn test_batch_processing_efficiency() {
+        let mut collection = EntityCollection::new("batch_test");
+        let mut interner = StringInterner::new();
+        let mut dataset_name_to_id = HashMap::new();
+
+        // Same test data for verification
+        let entity_data = vec![
+            {
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["c2".to_string(), "c1".to_string()],
+                );
+                data.insert("orders".to_string(), vec!["o1".to_string()]);
+                data
+            },
+            {
+                let mut data = HashMap::new();
+                data.insert("customers".to_string(), vec!["c3".to_string()]);
+                data
+            },
+        ];
+
+        // Process with batch method (now the only method)
+        collection.add_entities(entity_data, &mut interner, &mut dataset_name_to_id);
+
+        // Verify results
+        assert_eq!(collection.len(), 2);
+        assert_eq!(collection.total_records(), 4); // c1, c2, o1, c3
+
+        // Check entities have expected data
+        for i in 0..collection.len() {
+            let entity = collection.get_entity(i).unwrap();
+
+            // All entities should have sorted records with optimized processing
+            assert!(entity.has_sorted_records());
+        }
     }
 }

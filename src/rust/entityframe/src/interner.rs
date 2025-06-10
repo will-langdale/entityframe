@@ -92,6 +92,46 @@ impl StringInterner {
         self.sorted_ids.as_ref().unwrap()
     }
 
+    /// Batch intern multiple strings and compute sorted order in single pass.
+    /// Returns (string_ids, sorted_ids) for efficient entity creation.
+    /// This achieves O(S log S) instead of O(S log S) per entity for batch processing.
+    pub fn batch_intern_with_sort(&mut self, strings: &[String]) -> (Vec<u32>, Vec<u32>) {
+        // First pass: intern all strings
+        let mut string_ids = Vec::with_capacity(strings.len());
+
+        for s in strings {
+            let id = self.intern(s);
+            string_ids.push(id);
+        }
+
+        // Second pass: get sorted order for these specific strings
+        // This is the key optimization - we only sort the local strings, not all strings
+        let mut local_sorted_ids = string_ids.clone();
+        local_sorted_ids.sort_by(|&a, &b| self.strings[a as usize].cmp(&self.strings[b as usize]));
+
+        (string_ids, local_sorted_ids)
+    }
+
+    /// Batch intern strings from multiple datasets, computing sorted order for each dataset.
+    /// This is optimized for entity creation where each dataset needs separate sorting.
+    /// Returns HashMap mapping dataset_id -> (record_ids, sorted_record_ids).
+    pub fn batch_intern_by_dataset(
+        &mut self,
+        dataset_records: &std::collections::HashMap<u32, Vec<String>>,
+    ) -> std::collections::HashMap<u32, (Vec<u32>, Vec<u32>)> {
+        use std::collections::HashMap;
+
+        let mut results = HashMap::new();
+
+        // Process each dataset
+        for (&dataset_id, records) in dataset_records {
+            let (record_ids, sorted_record_ids) = self.batch_intern_with_sort(records);
+            results.insert(dataset_id, (record_ids, sorted_record_ids));
+        }
+
+        results
+    }
+
     /// Merge another interner into this one, returning the ID remapping table
     pub fn merge(&mut self, other: &StringInterner) -> std::collections::HashMap<u32, u32> {
         use std::collections::HashMap;
@@ -175,5 +215,99 @@ mod tests {
         assert_eq!(interner1.get_string_internal(2), Some("cherry"));
         assert_eq!(interner1.get_string_internal(3), Some("date"));
         assert_eq!(interner1.get_string_internal(4), Some("elderberry"));
+    }
+
+    #[test]
+    fn test_batch_intern_with_sort() {
+        let mut interner = StringInterner::new();
+
+        // Test batch processing with sorting
+        let strings = vec![
+            "zebra".to_string(),
+            "apple".to_string(),
+            "banana".to_string(),
+            "cherry".to_string(),
+        ];
+
+        let (string_ids, sorted_ids) = interner.batch_intern_with_sort(&strings);
+
+        // Check that strings were interned
+        assert_eq!(string_ids.len(), 4);
+        assert_eq!(sorted_ids.len(), 4);
+
+        // Verify sorted order (apple, banana, cherry, zebra alphabetically)
+        let sorted_strings: Vec<&str> = sorted_ids
+            .iter()
+            .map(|&id| interner.get_string_internal(id).unwrap())
+            .collect();
+        assert_eq!(sorted_strings, vec!["apple", "banana", "cherry", "zebra"]);
+
+        // Test with duplicate strings
+        let strings2 = vec![
+            "banana".to_string(), // Already exists
+            "date".to_string(),   // New
+            "apple".to_string(),  // Already exists
+        ];
+
+        let (string_ids2, sorted_ids2) = interner.batch_intern_with_sort(&strings2);
+        assert_eq!(string_ids2.len(), 3);
+        assert_eq!(sorted_ids2.len(), 3);
+
+        // Verify sorted order for this batch (apple, banana, date)
+        let sorted_strings2: Vec<&str> = sorted_ids2
+            .iter()
+            .map(|&id| interner.get_string_internal(id).unwrap())
+            .collect();
+        assert_eq!(sorted_strings2, vec!["apple", "banana", "date"]);
+    }
+
+    #[test]
+    fn test_batch_intern_by_dataset() {
+        use std::collections::HashMap;
+
+        let mut interner = StringInterner::new();
+
+        // Prepare dataset records
+        let mut dataset_records = HashMap::new();
+        dataset_records.insert(
+            0,
+            vec![
+                "cust_3".to_string(),
+                "cust_1".to_string(),
+                "cust_2".to_string(),
+            ],
+        );
+        dataset_records.insert(1, vec!["order_b".to_string(), "order_a".to_string()]);
+
+        let results = interner.batch_intern_by_dataset(&dataset_records);
+
+        // Check that we got results for both datasets
+        assert_eq!(results.len(), 2);
+        assert!(results.contains_key(&0));
+        assert!(results.contains_key(&1));
+
+        // Check dataset 0 (customers)
+        let (cust_ids, cust_sorted) = &results[&0];
+        assert_eq!(cust_ids.len(), 3);
+        assert_eq!(cust_sorted.len(), 3);
+
+        // Verify sorted order for customers (cust_1, cust_2, cust_3)
+        let cust_sorted_strings: Vec<&str> = cust_sorted
+            .iter()
+            .map(|&id| interner.get_string_internal(id).unwrap())
+            .collect();
+        assert_eq!(cust_sorted_strings, vec!["cust_1", "cust_2", "cust_3"]);
+
+        // Check dataset 1 (orders)
+        let (order_ids, order_sorted) = &results[&1];
+        assert_eq!(order_ids.len(), 2);
+        assert_eq!(order_sorted.len(), 2);
+
+        // Verify sorted order for orders (order_a, order_b)
+        let order_sorted_strings: Vec<&str> = order_sorted
+            .iter()
+            .map(|&id| interner.get_string_internal(id).unwrap())
+            .collect();
+        assert_eq!(order_sorted_strings, vec!["order_a", "order_b"]);
     }
 }
