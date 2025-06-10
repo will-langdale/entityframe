@@ -6,6 +6,7 @@ architecture: string interning, roaring bitmaps, and entity hashing.
 """
 
 from ._rust import StringInterner, Entity, EntityCollection, EntityFrame
+from .entity_wrapper import EntityWrapper
 
 
 __all__ = [
@@ -13,4 +14,5 @@ __all__ = [
     "Entity",
     "EntityFrame",
     "EntityCollection",
+    "EntityWrapper",
 ]

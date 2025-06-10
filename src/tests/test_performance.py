@@ -3,7 +3,7 @@ Performance tests demonstrating EntityFrame can handle massive scale efficiently
 """
 
 import time
-from entityframe import EntityFrame
+from entityframe import EntityFrame, EntityWrapper
 
 
 class TestPerformance:
@@ -239,4 +239,139 @@ class TestPerformance:
 
         print(
             "✅ Memory efficiency test passed! String interning provides significant savings."
+        )
+
+    def test_hashing_performance(self):
+        """Test performance of entity hashing operations."""
+        print("\n🔐 Testing entity hashing performance...")
+
+        num_entities = 1000  # 1K entities for hash performance test
+
+        # Generate test data with varying entity sizes
+        entities_data = []
+        for i in range(num_entities):
+            # Vary the number of datasets and records per entity
+            entity = {}
+
+            # Small entities (1-2 datasets)
+            if i % 3 == 0:
+                entity["customers"] = [f"c_{i}_{j}" for j in range(2)]
+
+            # Medium entities (2-3 datasets)
+            elif i % 3 == 1:
+                entity["customers"] = [f"c_{i}_{j}" for j in range(5)]
+                entity["orders"] = [f"o_{i}_{j}" for j in range(3)]
+
+            # Large entities (3-4 datasets)
+            else:
+                entity["customers"] = [f"c_{i}_{j}" for j in range(10)]
+                entity["orders"] = [f"o_{i}_{j}" for j in range(8)]
+                entity["transactions"] = [f"t_{i}_{j}" for j in range(15)]
+                entity["addresses"] = [f"a_{i}_{j}" for j in range(2)]
+
+            entities_data.append(entity)
+
+        # Build frame
+        frame = EntityFrame()
+        frame.add_method("hash_test", entities_data)
+
+        # Test hashing performance for different algorithms
+        algorithms = ["sha256", "sha512", "blake3", "sha3-256"]
+
+        for algorithm in algorithms:
+            print(f"🔍 Testing {algorithm} hashing...")
+            start_time = time.time()
+
+            # Hash all entities
+            hashes = []
+            for i in range(num_entities):
+                hash_bytes = frame.hash_entity("hash_test", i, algorithm)
+                hashes.append(hash_bytes)
+
+            hash_time = time.time() - start_time
+            hashes_per_second = num_entities / hash_time if hash_time > 0 else 0
+
+            print(f"   • {num_entities:,} hashes in {hash_time:.3f}s")
+            print(f"   • Rate: {hashes_per_second:,.0f} hashes/second")
+
+            # Verify hashes are deterministic (hash same entity twice)
+            hash1 = frame.hash_entity("hash_test", 0, algorithm)
+            hash2 = frame.hash_entity("hash_test", 0, algorithm)
+            assert hash1 == hash2, f"{algorithm} hash should be deterministic"
+
+            # Verify different entities produce different hashes
+            hash_entity_0 = frame.hash_entity("hash_test", 0, algorithm)
+            hash_entity_1 = frame.hash_entity("hash_test", 1, algorithm)
+            assert hash_entity_0 != hash_entity_1, (
+                f"{algorithm} should produce different hashes for different entities"
+            )
+
+            # Performance assertion
+            assert hashes_per_second > 100, (
+                f"{algorithm} should hash >100 entities/second, got {hashes_per_second:.0f}"
+            )
+
+        # Test metadata performance with hashes
+        print("📝 Testing metadata storage with hashes...")
+        metadata_start = time.time()
+
+        # Store hash as metadata for first 100 entities
+        test_count = min(100, num_entities)
+        for i in range(test_count):
+            entity_hash = frame.hash_entity("hash_test", i, "sha256")
+            frame.set_entity_metadata("hash_test", i, "sha256_hash", entity_hash)
+            frame.set_entity_metadata("hash_test", i, "timestamp", b"2024-01-01")
+
+        metadata_time = time.time() - metadata_start
+        metadata_rate = test_count / metadata_time if metadata_time > 0 else 0
+
+        print(f"   • Set metadata for {test_count} entities in {metadata_time:.3f}s")
+        print(f"   • Rate: {metadata_rate:,.0f} metadata ops/second")
+
+        # Verify metadata retrieval
+        retrieval_start = time.time()
+        for i in range(test_count):
+            stored_hash = frame.get_entity_metadata("hash_test", i, "sha256_hash")
+            timestamp = frame.get_entity_metadata("hash_test", i, "timestamp")
+            assert stored_hash is not None
+            assert timestamp == b"2024-01-01"
+
+        retrieval_time = time.time() - retrieval_start
+        retrieval_rate = test_count / retrieval_time if retrieval_time > 0 else 0
+
+        print(
+            f"   • Retrieved metadata for {test_count} entities in {retrieval_time:.3f}s"
+        )
+        print(f"   • Rate: {retrieval_rate:,.0f} metadata retrievals/second")
+
+        # Test wrapper performance
+        print("🎯 Testing EntityWrapper performance...")
+        wrapper_start = time.time()
+
+        test_entity = EntityWrapper(frame, "hash_test", 0)
+        for _ in range(100):  # Hash same entity many times to test caching benefits
+            hash_result = test_entity.hash("sha256")
+            hex_result = test_entity.hexdigest("sha256")
+            assert len(hash_result) == 32
+            assert len(hex_result) == 64
+
+        wrapper_time = time.time() - wrapper_start
+        wrapper_rate = 100 / wrapper_time if wrapper_time > 0 else 0
+
+        print(f"   • 100 wrapper hash calls in {wrapper_time:.3f}s")
+        print(f"   • Rate: {wrapper_rate:,.0f} wrapper calls/second")
+
+        # Performance assertions - adjusted for realistic expectations
+        assert metadata_rate > 50, (
+            f"Metadata ops should be >50/second, got {metadata_rate:.0f}"
+        )
+        assert retrieval_rate > 1000, (
+            f"Metadata retrieval should be >1000/second, got {retrieval_rate:.0f}"
+        )
+        assert wrapper_rate > 100, (
+            f"Wrapper calls should be >100/second, got {wrapper_rate:.0f}"
+        )
+
+        print(
+            "✅ Hashing performance test passed! All operations meet performance targets."
         )

@@ -1,5 +1,8 @@
+use blake3::Hasher as Blake3Hasher;
 use pyo3::prelude::*;
 use roaring::RoaringBitmap;
+use sha2::{Digest, Sha256, Sha512};
+use sha3::{Sha3_256, Sha3_512};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
@@ -9,6 +12,7 @@ use std::hash::{Hash, Hasher};
 #[derive(Clone)]
 pub struct Entity {
     datasets: HashMap<u32, RoaringBitmap>,
+    metadata: Option<HashMap<u32, Vec<u8>>>,
 }
 
 impl Default for Entity {
@@ -23,6 +27,7 @@ impl Entity {
     pub fn new() -> Self {
         Self {
             datasets: HashMap::new(),
+            metadata: None,
         }
     }
 
@@ -142,6 +147,43 @@ impl Entity {
             intersection_size as f64 / union_size as f64
         }
     }
+
+    /// Set metadata for a key (requires interner for key interning).
+    pub fn set_metadata(&mut self, key_id: u32, value: Vec<u8>) {
+        if self.metadata.is_none() {
+            self.metadata = Some(HashMap::new());
+        }
+        self.metadata.as_mut().unwrap().insert(key_id, value);
+    }
+
+    /// Get metadata by key ID (internal method).
+    pub fn get_metadata_by_id(&self, key_id: u32) -> Option<&[u8]> {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get(&key_id))
+            .map(|v| v.as_slice())
+    }
+
+    /// Check if metadata key exists.
+    pub fn has_metadata(&self, key_id: u32) -> bool {
+        self.metadata
+            .as_ref()
+            .map(|m| m.contains_key(&key_id))
+            .unwrap_or(false)
+    }
+
+    /// Clear all metadata.
+    pub fn clear_metadata(&mut self) {
+        self.metadata = None;
+    }
+
+    /// Get all metadata keys.
+    pub fn get_metadata_keys(&self) -> Vec<u32> {
+        self.metadata
+            .as_ref()
+            .map(|m| m.keys().copied().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl Entity {
@@ -213,6 +255,93 @@ impl Entity {
         }
 
         self.datasets = new_datasets;
+    }
+
+    /// Compute deterministic hash of the entity using specified algorithm.
+    /// Requires mutable interner reference for sorting by string values.
+    pub fn deterministic_hash(
+        &self,
+        interner: &mut crate::interner::StringInterner,
+        algorithm: &str,
+    ) -> PyResult<Vec<u8>> {
+        // Get sorted dataset IDs
+        let sorted_ids = interner.get_sorted_ids();
+
+        // Collect datasets that exist in this entity, maintaining sorted order
+        let mut sorted_datasets: Vec<(u32, &RoaringBitmap)> = Vec::new();
+        for &id in sorted_ids {
+            if let Some(bitmap) = self.datasets.get(&id) {
+                sorted_datasets.push((id, bitmap));
+            }
+        }
+
+        // Create hasher based on algorithm
+        enum HasherType {
+            Sha256(Sha256),
+            Sha512(Sha512),
+            Sha3_256(Sha3_256),
+            Sha3_512(Sha3_512),
+            Blake3(Box<Blake3Hasher>),
+        }
+
+        let mut hasher = match algorithm.to_lowercase().as_str() {
+            "sha256" => HasherType::Sha256(Sha256::new()),
+            "sha512" => HasherType::Sha512(Sha512::new()),
+            "sha3-256" => HasherType::Sha3_256(Sha3_256::new()),
+            "sha3-512" => HasherType::Sha3_512(Sha3_512::new()),
+            "blake3" => HasherType::Blake3(Box::new(Blake3Hasher::new())),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("Unsupported hash algorithm: {}. Supported: sha256, sha512, sha3-256, sha3-512, blake3", algorithm)
+                ));
+            }
+        };
+
+        // Hash each dataset and its records in sorted order
+        for (dataset_id, bitmap) in sorted_datasets {
+            // Get dataset string and hash it
+            let dataset_str = interner.get_string(dataset_id)?;
+            match &mut hasher {
+                HasherType::Sha256(h) => h.update(dataset_str.as_bytes()),
+                HasherType::Sha512(h) => h.update(dataset_str.as_bytes()),
+                HasherType::Sha3_256(h) => h.update(dataset_str.as_bytes()),
+                HasherType::Sha3_512(h) => h.update(dataset_str.as_bytes()),
+                HasherType::Blake3(h) => {
+                    h.update(dataset_str.as_bytes());
+                }
+            }
+
+            // Collect record IDs and sort them by their string values
+            let mut record_ids: Vec<u32> = bitmap.iter().collect();
+            record_ids.sort_by(|&a, &b| {
+                let str_a = interner.get_string_internal(a).unwrap_or("");
+                let str_b = interner.get_string_internal(b).unwrap_or("");
+                str_a.cmp(str_b)
+            });
+
+            // Hash each record string
+            for record_id in record_ids {
+                let record_str = interner.get_string(record_id)?;
+                match &mut hasher {
+                    HasherType::Sha256(h) => h.update(record_str.as_bytes()),
+                    HasherType::Sha512(h) => h.update(record_str.as_bytes()),
+                    HasherType::Sha3_256(h) => h.update(record_str.as_bytes()),
+                    HasherType::Sha3_512(h) => h.update(record_str.as_bytes()),
+                    HasherType::Blake3(h) => {
+                        h.update(record_str.as_bytes());
+                    }
+                }
+            }
+        }
+
+        // Finalize and return hash
+        Ok(match hasher {
+            HasherType::Sha256(h) => h.finalize().to_vec(),
+            HasherType::Sha512(h) => h.finalize().to_vec(),
+            HasherType::Sha3_256(h) => h.finalize().to_vec(),
+            HasherType::Sha3_512(h) => h.finalize().to_vec(),
+            HasherType::Blake3(h) => h.finalize().as_bytes().to_vec(),
+        })
     }
 }
 

@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub struct StringInterner {
     strings: Vec<Arc<str>>,
     string_to_id: FxHashMap<Arc<str>, u32>,
+    sorted_ids: Option<Vec<u32>>,
 }
 
 impl Default for StringInterner {
@@ -24,11 +25,15 @@ impl StringInterner {
         Self {
             strings: Vec::new(),
             string_to_id: FxHashMap::default(),
+            sorted_ids: None,
         }
     }
 
     /// Intern a string and return its ID.
     pub fn intern(&mut self, s: &str) -> u32 {
+        // Invalidate sorted cache when new string is added
+        self.sorted_ids = None;
+
         // Use entry API to avoid double hashing
         let next_id = self.strings.len() as u32;
         match self.string_to_id.entry(Arc::from(s)) {
@@ -47,6 +52,7 @@ impl StringInterner {
         Self {
             strings: Vec::with_capacity(capacity),
             string_to_id: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
+            sorted_ids: None,
         }
     }
 
@@ -75,9 +81,24 @@ impl StringInterner {
         self.strings.get(id as usize).map(|s| s.as_ref())
     }
 
+    /// Get IDs in sorted string order (cached).
+    /// This method is not exposed to Python and requires mutable access for caching.
+    pub fn get_sorted_ids(&mut self) -> &[u32] {
+        if self.sorted_ids.is_none() {
+            let mut ids: Vec<u32> = (0..self.strings.len() as u32).collect();
+            ids.sort_by(|&a, &b| self.strings[a as usize].cmp(&self.strings[b as usize]));
+            self.sorted_ids = Some(ids);
+        }
+        self.sorted_ids.as_ref().unwrap()
+    }
+
     /// Merge another interner into this one, returning the ID remapping table
     pub fn merge(&mut self, other: &StringInterner) -> std::collections::HashMap<u32, u32> {
         use std::collections::HashMap;
+
+        // Invalidate sorted cache since we're adding new strings
+        self.sorted_ids = None;
+
         let mut remapping = HashMap::new();
 
         for (old_id, string) in other.strings.iter().enumerate() {

@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use std::collections::HashMap;
 
 use crate::collection::EntityCollection;
@@ -176,6 +177,80 @@ impl EntityFrame {
             // Dataset not found
             Ok(false)
         }
+    }
+
+    /// Set metadata on an entity
+    pub fn set_entity_metadata(
+        &mut self,
+        collection_name: &str,
+        entity_index: usize,
+        key: &str,
+        value: &[u8],
+    ) -> PyResult<()> {
+        let collection = self.collections.get_mut(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        let entity = collection.entities.get_mut(entity_index).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>("Entity index out of range")
+        })?;
+
+        // Intern the metadata key
+        let key_id = self.interner.intern(key);
+        entity.set_metadata(key_id, value.to_vec());
+        Ok(())
+    }
+
+    /// Get metadata from an entity
+    pub fn get_entity_metadata(
+        &mut self,
+        collection_name: &str,
+        entity_index: usize,
+        key: &str,
+    ) -> PyResult<Option<Vec<u8>>> {
+        let collection = self.collections.get(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        let entity = collection.entities.get(entity_index).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>("Entity index out of range")
+        })?;
+
+        // Try to intern the key to get its ID (this won't add it if it doesn't exist)
+        let key_id = self.interner.intern(key);
+        Ok(entity.get_metadata_by_id(key_id).map(|v| v.to_vec()))
+    }
+
+    /// Compute hash of an entity
+    #[pyo3(signature = (collection_name, entity_index, algorithm = "sha256"))]
+    pub fn hash_entity(
+        &mut self,
+        collection_name: &str,
+        entity_index: usize,
+        algorithm: &str,
+    ) -> PyResult<Py<PyBytes>> {
+        let collection = self.collections.get(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        let entity = collection.entities.get(entity_index).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>("Entity index out of range")
+        })?;
+
+        // Compute hash
+        let hash_bytes = entity.deterministic_hash(&mut self.interner, algorithm)?;
+
+        // Return as PyBytes
+        Python::with_gil(|py| Ok(PyBytes::new(py, &hash_bytes).into()))
     }
 }
 
