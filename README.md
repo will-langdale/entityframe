@@ -20,12 +20,18 @@ dedupe_results = [
     {"customers": ["cust_002", "cust_003"], "transactions": ["txn_101", "txn_102"]},
 ]
 
-# Create a frame with known datasets (optional - add_method auto-declares)
-frame = ef.EntityFrame.with_datasets(["customers", "transactions"])
+# Create frame and declare datasets upfront for efficiency
+frame = ef.EntityFrame()
+frame.declare_dataset("customers")
+frame.declare_dataset("transactions")
 
 # Add both collections
 frame.add_method("splink", splink_results)
 frame.add_method("dedupe", dedupe_results)
+
+# Calculate hashes for integrity and comparison
+frame.splink.add_hash("blake3")
+frame.dedupe.add_hash("blake3")
 
 # Compare how well the methods agree
 comparisons = frame.compare_collections("splink", "dedupe")
@@ -67,7 +73,7 @@ cd entityframe
 just install && just build
 ```
 
-## Simple example
+## Working with hashes and metadata
 
 ```python
 import entityframe as ef
@@ -92,10 +98,69 @@ frame.declare_dataset("emails")
 frame.add_method("conservative", method1)
 frame.add_method("aggressive", method2)
 
-# See how they differ
+# Calculate hashes for entity integrity (batch processed for performance)
+frame.conservative.add_hash("blake3")
+frame.aggressive.add_hash("blake3")
+
+# Access entities with metadata
+entity = frame.conservative[0]
+print(f"Entity: {entity}")
+# {'metadata': {'hash': b'\x7a\x2f\x8c\x91...'}, 'customers': ['john_1'], 'emails': ['john@email.com']}
+
+# Verify hash integrity later
+if frame.conservative.verify_hashes("blake3"):
+    print("All hashes verified successfully")
+
+# See how methods differ
 results = frame.compare_collections("conservative", "aggressive")
 for result in results:
     print(f"Entity {result['entity_index']}: {result['jaccard']:.2f} similarity")
+```
+
+## Working with pre-existing metadata
+
+```python
+import entityframe as ef
+
+# Entities with existing metadata (from previous processing)
+existing_entities = [
+    {
+        "customers": ["alice_1", "alice_2"], 
+        "emails": ["alice@personal.com", "a.johnson@company.com"],
+        "metadata": {
+            "id": 1,
+            "hash": b"\x3b\x4c\x9d\xa2\x5f\x7e\x8b\x1c",
+            "created_at": "2024-01-15T10:30:00Z",
+            "source": "import_batch_001"
+        }
+    },
+    {
+        "customers": ["bob_smith"],
+        "emails": ["bob.smith@email.org"],
+        "metadata": {
+            "id": 2,
+            "hash": b"\x9e\x2a\x7f\x3c\x8d\x1b\x6e\x4a",
+            "created_at": "2024-01-15T10:31:00Z", 
+            "source": "import_batch_001"
+        }
+    }
+]
+
+# Create frame and add method with existing entities
+frame = ef.EntityFrame()
+frame.declare_dataset("customers")
+frame.declare_dataset("emails")
+frame.add_method("imported", existing_entities)
+
+# Access entity with preserved metadata
+entity = frame.imported[0]
+print(f"ID: {entity['metadata']['id']}")
+print(f"Hash: {entity['metadata']['hash'].hex()}")
+print(f"Source: {entity['metadata']['source']}")
+
+# Verify existing hashes match the data
+if frame.imported.verify_hashes("blake3"):
+    print("All imported hashes verified successfully")
 ```
 
 ## Working with individual entities

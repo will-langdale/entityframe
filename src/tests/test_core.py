@@ -215,7 +215,7 @@ class TestEntity:
         assert similarity == 1.0  # Both empty, so considered identical
 
     def test_entity_with_multiple_datasets(self):
-        """Test entity behavior with multiple diverse datasets."""
+        """Test entity behaviour with multiple diverse datasets."""
         entity = Entity()
 
         # Add records to various datasets

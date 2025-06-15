@@ -5,7 +5,10 @@ This package provides high-performance entity resolution evaluation using a thre
 architecture: string interning, roaring bitmaps, and entity hashing.
 """
 
-from ._rust import StringInterner, Entity, EntityCollection, EntityFrame
+from .entityframe import StringInterner, Entity, EntityCollection
+from .frame import EntityFrame
+from .entity import EntityWrapper
+from .collection import CollectionWrapper
 
 
 __all__ = [
@@ -13,4 +16,6 @@ __all__ = [
     "Entity",
     "EntityFrame",
     "EntityCollection",
+    "EntityWrapper",
+    "CollectionWrapper",
 ]

@@ -23,9 +23,9 @@ test: test-python test-rust
 
 # Format and lint all code (Python + Rust)
 format:
-    uv run ruff format src/
-    uv run ruff check src/
-    uv run mypy src/python/
+    uvx ruff check src/ --fix
+    uvx ruff format src/
+    uvx mypy src/python/
     cargo fmt
     cargo clippy
 

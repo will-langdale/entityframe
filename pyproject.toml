@@ -29,7 +29,7 @@ build-backend = "maturin"
 
 [tool.maturin]
 python-source = "src/python"
-module-name = "entityframe._rust"
+module-name = "entityframe.entityframe"
 manifest-path = "src/rust/entityframe/Cargo.toml"
 
 [dependency-groups]
@@ -47,7 +47,7 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = "entityframe._rust"
+module = "entityframe.entityframe"
 ignore_missing_imports = true
 
 [tool.uv]

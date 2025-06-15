@@ -178,7 +178,7 @@ class TestEntityFrame:
         assert frame.interner_size() == 2  # "customers" + "cust_001"
 
     def test_frame_with_empty_collections(self):
-        """Test frame behavior with empty collections."""
+        """Test frame behaviour with empty collections."""
         frame = EntityFrame()
         empty_collection = EntityCollection("empty_process")
 
@@ -307,8 +307,11 @@ class TestEntityFrame:
     def test_multiple_methods_with_diverse_datasets(self):
         """Test multiple methods with different dataset combinations."""
 
-        # Create frame with pre-declared datasets
-        frame = EntityFrame.with_datasets(["customers", "orders", "products"])
+        # Create frame and pre-declare datasets for efficiency
+        frame = EntityFrame()
+        frame.declare_dataset("customers")
+        frame.declare_dataset("orders")
+        frame.declare_dataset("products")
 
         # Add first method
         frame.add_method(
