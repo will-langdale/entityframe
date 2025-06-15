@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 mod collection;
 mod entity;
 mod frame;
+mod hash;
 mod interner;
 
 pub use collection::EntityCollection;

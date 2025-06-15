@@ -172,6 +172,52 @@ impl EntityCollection {
             self.entities.push(entity);
         }
     }
+
+    /// Batch hash all entities in this collection for optimal performance
+    pub fn hash_all_entities(
+        &self,
+        interner: &mut crate::interner::StringInterner,
+        algorithm: &str,
+    ) -> PyResult<Vec<Vec<u8>>> {
+        if self.entities.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Get sorted dataset IDs from interner
+        let sorted_dataset_ids = interner.get_sorted_ids().to_vec();
+
+        // Collect all string IDs needed for ALL entities (bulk optimisation)
+        let entity_refs: Vec<_> = self.entities.iter().collect();
+        let string_ids = crate::hash::collect_string_ids(&entity_refs, &sorted_dataset_ids);
+
+        // Single bulk string lookup for ALL entities
+        let string_cache = interner.bulk_get_strings(&string_ids);
+
+        // Process each entity using cached strings
+        let mut results = Vec::with_capacity(self.entities.len());
+        for entity in &self.entities {
+            let hash = crate::hash::hash_entity_with_cache(
+                entity.get_datasets_map(),
+                entity.get_sorted_records_map(),
+                &sorted_dataset_ids,
+                &string_cache,
+                algorithm,
+            )?;
+            results.push(hash);
+        }
+
+        Ok(results)
+    }
+
+    /// Batch hash all entities returning hex strings for convenience
+    pub fn hash_all_entities_hex(
+        &self,
+        interner: &mut crate::interner::StringInterner,
+        algorithm: &str,
+    ) -> PyResult<Vec<String>> {
+        let hashes = self.hash_all_entities(interner, algorithm)?;
+        Ok(hashes.into_iter().map(hex::encode).collect())
+    }
 }
 
 #[cfg(test)]
@@ -256,7 +302,7 @@ mod tests {
             },
         ];
 
-        // Use optimized entity processing
+        // Use optimised entity processing
         collection.add_entities(entity_data, &mut interner, &mut dataset_name_to_id);
 
         assert_eq!(collection.len(), 2);
@@ -340,8 +386,73 @@ mod tests {
         for i in 0..collection.len() {
             let entity = collection.get_entity(i).unwrap();
 
-            // All entities should have sorted records with optimized processing
+            // All entities should have sorted records with optimised processing
             assert!(entity.has_sorted_records());
         }
+    }
+
+    #[test]
+    fn test_batch_hashing() {
+        let mut collection = EntityCollection::new("hash_test");
+        let mut interner = StringInterner::new();
+        let mut dataset_name_to_id = HashMap::new();
+
+        // Create test data
+        let entity_data = vec![
+            {
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["c1".to_string(), "c2".to_string()],
+                );
+                data.insert("orders".to_string(), vec!["o1".to_string()]);
+                data
+            },
+            {
+                let mut data = HashMap::new();
+                data.insert("customers".to_string(), vec!["c3".to_string()]);
+                data.insert(
+                    "orders".to_string(),
+                    vec!["o2".to_string(), "o3".to_string()],
+                );
+                data
+            },
+        ];
+
+        collection.add_entities(entity_data, &mut interner, &mut dataset_name_to_id);
+
+        // Test batch hashing
+        let hashes = collection
+            .hash_all_entities(&mut interner, "sha256")
+            .unwrap();
+        assert_eq!(hashes.len(), 2);
+
+        // Verify hash sizes (SHA-256 = 32 bytes)
+        for hash in &hashes {
+            assert_eq!(hash.len(), 32);
+        }
+
+        // Test hex batch hashing
+        let hex_hashes = collection
+            .hash_all_entities_hex(&mut interner, "blake3")
+            .unwrap();
+        assert_eq!(hex_hashes.len(), 2);
+
+        // Verify hex strings (32 bytes = 64 hex chars)
+        for hex_hash in &hex_hashes {
+            assert_eq!(hex_hash.len(), 64);
+        }
+
+        // Test consistency - same algorithm should produce same results
+        let hashes2 = collection
+            .hash_all_entities(&mut interner, "sha256")
+            .unwrap();
+        assert_eq!(hashes, hashes2);
+
+        // Test different algorithms produce different results
+        let blake_hashes = collection
+            .hash_all_entities(&mut interner, "blake3")
+            .unwrap();
+        assert_ne!(hashes, blake_hashes);
     }
 }

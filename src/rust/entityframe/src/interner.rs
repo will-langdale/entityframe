@@ -81,6 +81,18 @@ impl StringInterner {
         self.strings.get(id as usize).map(|s| s.as_ref())
     }
 
+    /// Bulk string lookup for batch processing optimisation
+    /// Returns HashMap mapping IDs to their string values
+    pub fn bulk_get_strings(&self, ids: &[u32]) -> std::collections::HashMap<u32, &str> {
+        let mut result = std::collections::HashMap::with_capacity(ids.len());
+        for &id in ids {
+            if let Some(string) = self.get_string_internal(id) {
+                result.insert(id, string);
+            }
+        }
+        result
+    }
+
     /// Get IDs in sorted string order (cached).
     /// This method is not exposed to Python and requires mutable access for caching.
     pub fn get_sorted_ids(&mut self) -> &[u32] {
@@ -105,7 +117,7 @@ impl StringInterner {
         }
 
         // Second pass: get sorted order for these specific strings
-        // This is the key optimization - we only sort the local strings, not all strings
+        // This is the key optimisation - we only sort the local strings, not all strings
         let mut local_sorted_ids = string_ids.clone();
         local_sorted_ids.sort_by(|&a, &b| self.strings[a as usize].cmp(&self.strings[b as usize]));
 
@@ -113,7 +125,7 @@ impl StringInterner {
     }
 
     /// Batch intern strings from multiple datasets, computing sorted order for each dataset.
-    /// This is optimized for entity creation where each dataset needs separate sorting.
+    /// This is optimised for entity creation where each dataset needs separate sorting.
     /// Returns HashMap mapping dataset_id -> (record_ids, sorted_record_ids).
     pub fn batch_intern_by_dataset(
         &mut self,

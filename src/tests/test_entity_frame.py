@@ -178,7 +178,7 @@ class TestEntityFrame:
         assert frame.interner_size() == 2  # "customers" + "cust_001"
 
     def test_frame_with_empty_collections(self):
-        """Test frame behavior with empty collections."""
+        """Test frame behaviour with empty collections."""
         frame = EntityFrame()
         empty_collection = EntityCollection("empty_process")
 

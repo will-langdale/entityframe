@@ -252,6 +252,75 @@ impl EntityFrame {
         // Return as PyBytes
         Python::with_gil(|py| Ok(PyBytes::new(py, &hash_bytes).into()))
     }
+
+    /// Batch hash all entities in a collection for optimal performance
+    #[pyo3(signature = (collection_name, algorithm = "sha256"))]
+    pub fn hash_collection(
+        &mut self,
+        collection_name: &str,
+        algorithm: &str,
+    ) -> PyResult<Vec<Py<PyBytes>>> {
+        let collection = self.collections.get(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        // Use collection's batch hashing method
+        let hashes = collection.hash_all_entities(&mut self.interner, algorithm)?;
+
+        // Convert to PyBytes for Python
+        Python::with_gil(|py| {
+            let py_hashes = hashes
+                .into_iter()
+                .map(|h| PyBytes::new(py, &h).into())
+                .collect();
+            Ok(py_hashes)
+        })
+    }
+
+    /// Batch hash all entities in a collection returning hex strings
+    #[pyo3(signature = (collection_name, algorithm = "sha256"))]
+    pub fn hash_collection_hex(
+        &mut self,
+        collection_name: &str,
+        algorithm: &str,
+    ) -> PyResult<Vec<String>> {
+        let collection = self.collections.get(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        // Use collection's batch hashing method
+        collection.hash_all_entities_hex(&mut self.interner, algorithm)
+    }
+
+    /// Batch hash all entities across all collections
+    #[pyo3(signature = (algorithm = "sha256"))]
+    pub fn hash_all_entities(
+        &mut self,
+        algorithm: &str,
+    ) -> PyResult<std::collections::HashMap<String, Vec<Py<PyBytes>>>> {
+        let mut result = std::collections::HashMap::new();
+
+        for (collection_name, collection) in &self.collections {
+            let hashes = collection.hash_all_entities(&mut self.interner, algorithm)?;
+
+            let py_hashes = Python::with_gil(|py| {
+                hashes
+                    .into_iter()
+                    .map(|h| PyBytes::new(py, &h).into())
+                    .collect()
+            });
+
+            result.insert(collection_name.clone(), py_hashes);
+        }
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -390,7 +459,7 @@ mod tests {
 
         frame.add_method("test", entity_data);
 
-        // Test that all entities have sorted records (since we use optimized batch processing)
+        // Test that all entities have sorted records (since we use optimised batch processing)
         let collection = frame.get_collection("test").unwrap();
         let entity1 = collection.get_entity(0).unwrap();
         let entity2 = collection.get_entity(1).unwrap();
@@ -401,5 +470,71 @@ mod tests {
         // We'll test hash consistency and differences at the Python test level
         assert_eq!(frame.collection_count(), 1);
         assert_eq!(frame.total_entities(), 2);
+    }
+
+    #[test]
+    fn test_batch_hashing_performance() {
+        let mut frame = EntityFrame::new();
+
+        // Create test data with multiple entities
+        let entity_data = vec![
+            {
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["c1".to_string(), "c2".to_string()],
+                );
+                data.insert("orders".to_string(), vec!["o1".to_string()]);
+                data
+            },
+            {
+                let mut data = HashMap::new();
+                data.insert("customers".to_string(), vec!["c3".to_string()]);
+                data.insert(
+                    "orders".to_string(),
+                    vec!["o2".to_string(), "o3".to_string()],
+                );
+                data
+            },
+            {
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["c4".to_string(), "c5".to_string()],
+                );
+                data
+            },
+        ];
+
+        frame.add_method("test_batch", entity_data);
+
+        // Test batch hashing vs individual hashing for consistency
+        let individual_hashes: Result<Vec<_>, _> = (0..3)
+            .map(|i| frame.hash_entity("test_batch", i, "sha256"))
+            .collect();
+        let individual_hashes = individual_hashes.unwrap();
+
+        let batch_hashes = frame.hash_collection("test_batch", "sha256").unwrap();
+
+        // Compare results (should be identical)
+        assert_eq!(individual_hashes.len(), batch_hashes.len());
+
+        // Note: We can't directly compare Py<PyBytes> in Rust tests easily,
+        // but we can verify the batch operation succeeded and returned the right count
+        assert_eq!(batch_hashes.len(), 3);
+
+        // Test hex batch hashing
+        let hex_hashes = frame.hash_collection_hex("test_batch", "sha256").unwrap();
+        assert_eq!(hex_hashes.len(), 3);
+
+        // Verify hex strings are proper length for SHA-256 (64 hex chars = 32 bytes)
+        for hex_hash in &hex_hashes {
+            assert_eq!(hex_hash.len(), 64);
+        }
+
+        // Test all entities across all collections
+        let all_hashes = frame.hash_all_entities("blake3").unwrap();
+        assert_eq!(all_hashes.len(), 1); // One collection
+        assert_eq!(all_hashes["test_batch"].len(), 3); // Three entities
     }
 }

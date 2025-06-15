@@ -56,7 +56,7 @@ impl Entity {
     /// Add a record ID to a dataset (Python API - requires string lookup).
     pub fn add_record(&mut self, dataset: &str, record_id: u32) {
         // For Python API compatibility, we use a simple hash of the dataset name
-        // In practice, this should be used with proper interner context
+        // In practise, this should be used with proper interner context
         let dataset_id = self.hash_dataset_name(dataset);
         self.add_record_by_id(dataset_id, record_id);
     }
@@ -100,7 +100,7 @@ impl Entity {
     /// Get all dataset names (Python API - limited without interner context).
     pub fn get_datasets(&self) -> Vec<String> {
         // For Python API compatibility, return placeholder names
-        // In practice, this should be called through EntityCollection which has interner access
+        // In practise, this should be called through EntityCollection which has interner access
         self.datasets
             .keys()
             .map(|id| format!("dataset_{}", id))
@@ -223,6 +223,16 @@ impl Entity {
         self.sorted_records.clear();
     }
 
+    /// Get reference to datasets for hash computation (internal method)
+    pub fn get_datasets_map(&self) -> &HashMap<u32, RoaringBitmap> {
+        &self.datasets
+    }
+
+    /// Get reference to sorted records for hash computation (internal method)
+    pub fn get_sorted_records_map(&self) -> &HashMap<u32, Vec<u32>> {
+        &self.sorted_records
+    }
+
     /// Remap dataset IDs according to the provided mapping (internal method)
     pub fn remap_dataset_ids(&mut self, remapping: &HashMap<u32, u32>) {
         // Create a new HashMap with remapped dataset IDs
@@ -301,6 +311,7 @@ impl Entity {
 
     /// Compute deterministic hash of the entity using specified algorithm.
     /// Uses pre-computed sorted order for optimal performance.
+    /// Fast path optimised for individual entity hashing.
     pub fn deterministic_hash(
         &self,
         interner: &mut crate::interner::StringInterner,
@@ -309,7 +320,7 @@ impl Entity {
         // Get sorted dataset IDs from interner and clone to avoid borrow issues
         let sorted_dataset_ids = interner.get_sorted_ids().to_vec();
 
-        // Create hasher based on algorithm
+        // Use fast enum-based hasher (avoid dynamic dispatch overhead)
         enum HasherType {
             Sha256(Sha256),
             Sha512(Sha512),
@@ -331,10 +342,10 @@ impl Entity {
             }
         };
 
-        // Process datasets in sorted order
+        // Process datasets in sorted order with direct string access
         for &dataset_id in &sorted_dataset_ids {
             if let Some(bitmap) = self.datasets.get(&dataset_id) {
-                // Get dataset string and hash it
+                // Direct string lookup (fast array access)
                 let dataset_str = interner.get_string(dataset_id)?;
                 match &mut hasher {
                     HasherType::Sha256(h) => h.update(dataset_str.as_bytes()),
@@ -386,7 +397,7 @@ impl Entity {
             }
         }
 
-        // Finalize and return hash
+        // Finalise and return hash
         Ok(match hasher {
             HasherType::Sha256(h) => h.finalize().to_vec(),
             HasherType::Sha512(h) => h.finalize().to_vec(),
@@ -606,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn test_optimized_hash_consistency() {
+    fn test_optimised_hash_consistency() {
         use crate::interner::StringInterner;
         use roaring::RoaringBitmap;
 
@@ -648,34 +659,34 @@ mod tests {
         sorted_records.insert(dataset1_id, vec![record2_id, record3_id, record1_id]); // customer_a, customer_m, customer_z
         sorted_records.insert(dataset2_id, vec![record5_id, record4_id]); // order_a, order_b
 
-        let entity_optimized = Entity::from_sorted_data(dataset_bitmaps.clone(), sorted_records);
+        let entity_optimised = Entity::from_sorted_data(dataset_bitmaps.clone(), sorted_records);
 
         // Create entity without batch processing (no sorted records)
         let mut entity_fallback = Entity::new();
         entity_fallback.datasets = dataset_bitmaps;
 
         // Both entities should produce the same hash
-        let hash_optimized = entity_optimized
+        let hash_optimised = entity_optimised
             .deterministic_hash(&mut interner, "sha256")
             .unwrap();
         let hash_fallback = entity_fallback
             .deterministic_hash(&mut interner, "sha256")
             .unwrap();
 
-        assert_eq!(hash_optimized, hash_fallback);
-        assert!(entity_optimized.has_sorted_records());
+        assert_eq!(hash_optimised, hash_fallback);
+        assert!(entity_optimised.has_sorted_records());
         assert!(!entity_fallback.has_sorted_records());
 
         // Test with different algorithms
-        let hash_optimized_blake3 = entity_optimized
+        let hash_optimised_blake3 = entity_optimised
             .deterministic_hash(&mut interner, "blake3")
             .unwrap();
         let hash_fallback_blake3 = entity_fallback
             .deterministic_hash(&mut interner, "blake3")
             .unwrap();
 
-        assert_eq!(hash_optimized_blake3, hash_fallback_blake3);
-        assert_ne!(hash_optimized, hash_optimized_blake3); // Different algorithms should produce different hashes
+        assert_eq!(hash_optimised_blake3, hash_fallback_blake3);
+        assert_ne!(hash_optimised, hash_optimised_blake3); // Different algorithms should produce different hashes
     }
 
     #[test]

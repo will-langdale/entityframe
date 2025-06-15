@@ -217,4 +217,4 @@ just format     # Format code
 
 ## License
 
-MIT License
+MIT Licence
