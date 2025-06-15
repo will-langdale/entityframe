@@ -1,28 +1,9 @@
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::entity::Entity;
 use crate::interner::StringInterner;
-
-/// Profiling data for performance analysis
-#[derive(Debug)]
-struct ProfilingData {
-    // Component timing (in nanoseconds)
-    hasher_creation_time: std::sync::atomic::AtomicU64,
-    string_lookup_time: std::sync::atomic::AtomicU64,
-    hash_update_time: std::sync::atomic::AtomicU64,
-    bitmap_iteration_time: std::sync::atomic::AtomicU64,
-    sorting_time: std::sync::atomic::AtomicU64,
-    finalization_time: std::sync::atomic::AtomicU64,
-
-    // Operation counters
-    fast_path_entities: std::sync::atomic::AtomicUsize,
-    fallback_entities: std::sync::atomic::AtomicUsize,
-    total_string_lookups: std::sync::atomic::AtomicUsize,
-    total_hash_updates: std::sync::atomic::AtomicUsize,
-    total_bitmap_iterations: std::sync::atomic::AtomicUsize,
-}
 
 /// EntityCollection: A collection of entities from a single process (like pandas Series)
 /// Collections should only be created through EntityFrame.create_collection() to ensure shared interner
@@ -199,161 +180,78 @@ impl EntityCollection {
         interner: &mut crate::interner::StringInterner,
         algorithm: &str,
     ) -> PyResult<Vec<Vec<u8>>> {
-        self.hash_all_entities_with_profiling(interner, algorithm, false)
-    }
-
-    /// Batch hash all entities with detailed profiling enabled (Python API)
-    pub fn hash_all_entities_profiling(
-        &self,
-        interner: &mut crate::interner::StringInterner,
-        algorithm: &str,
-    ) -> PyResult<Vec<Vec<u8>>> {
-        self.hash_all_entities_with_profiling(interner, algorithm, true)
-    }
-
-    /// Batch hash all entities with detailed profiling enabled
-    pub fn hash_all_entities_with_profiling(
-        &self,
-        interner: &mut crate::interner::StringInterner,
-        algorithm: &str,
-        enable_profiling: bool,
-    ) -> PyResult<Vec<Vec<u8>>> {
-        use std::sync::atomic::{AtomicU64, AtomicUsize};
-
         if self.entities.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Profiling data structures (shared across threads)
-        let profiling_data = if enable_profiling {
-            Some(Arc::new(ProfilingData {
-                hasher_creation_time: AtomicU64::new(0),
-                string_lookup_time: AtomicU64::new(0),
-                hash_update_time: AtomicU64::new(0),
-                bitmap_iteration_time: AtomicU64::new(0),
-                sorting_time: AtomicU64::new(0),
-                finalization_time: AtomicU64::new(0),
-                fast_path_entities: AtomicUsize::new(0),
-                fallback_entities: AtomicUsize::new(0),
-                total_string_lookups: AtomicUsize::new(0),
-                total_hash_updates: AtomicUsize::new(0),
-                total_bitmap_iterations: AtomicUsize::new(0),
-            }))
-        } else {
-            None
-        };
-
-        // Get sorted dataset IDs from interner (one-time cost, requires mutable access)
-        let sorted_dataset_ids = interner.get_sorted_ids().to_vec();
-
-        // Clone algorithm string for parallel use
-        let algo = algorithm.to_string();
-
-        let total_start = std::time::Instant::now();
         let total_entities = self.entities.len();
 
-        // Pre-compute position mapping once for all entities (major optimization)
-        let position_map: std::collections::HashMap<u32, usize> = sorted_dataset_ids
+        // Get sorted dataset IDs from interner for deterministic ordering
+        let sorted_dataset_ids = interner.get_sorted_ids().to_vec();
+
+        // Pre-compute position mapping for efficient dataset ordering
+        let position_map: HashMap<u32, usize> = sorted_dataset_ids
             .iter()
             .enumerate()
             .map(|(pos, &id)| (id, pos))
             .collect();
 
-        // Adaptive parallelization strategy based on over-parallelization analysis
-        let all_hashes = if total_entities < 1000 {
-            // Single-threaded for small datasets to avoid thread coordination overhead
-            if enable_profiling {
-                println!(
-                    "\n⚡ Using SINGLE-THREADED approach ({} entities < 1000 threshold)",
-                    total_entities
-                );
-            }
-            self.hash_entities_sequential(
-                &sorted_dataset_ids,
-                &position_map,
-                interner,
-                &algo,
-                &profiling_data,
-            )
+        // Adaptive parallelization: single-threaded for small datasets,
+        // chunked parallel for larger datasets to optimize performance
+        if total_entities < 1000 {
+            // Single-threaded for small datasets (avoids thread coordination overhead)
+            self.hash_entities_sequential(&sorted_dataset_ids, &position_map, interner, algorithm)
         } else {
             // Chunked parallel processing for larger datasets
             let optimal_chunk_size =
                 std::cmp::max(500, total_entities / rayon::current_num_threads());
-            if enable_profiling {
-                println!(
-                    "\n⚡ Using CHUNKED PARALLEL approach ({} entities, chunk size: {})",
-                    total_entities, optimal_chunk_size
-                );
-            }
-            self.hash_entities_chunked_parallel(
+            self.hash_entities_parallel(
                 &sorted_dataset_ids,
                 &position_map,
                 interner,
-                &algo,
-                &profiling_data,
+                algorithm,
                 optimal_chunk_size,
             )
-        }?;
-
-        let total_time = total_start.elapsed();
-        let entities_per_sec = total_entities as f64 / total_time.as_secs_f64();
-
-        if enable_profiling {
-            if let Some(profiling) = &profiling_data {
-                self.print_detailed_profiling(profiling, total_time, total_entities);
-            }
-        } else {
-            println!("\nAdaptive parallel hashing performance:");
-            println!(
-                "  {} entities in {:.1}ms ({:.0} entities/sec)",
-                total_entities,
-                total_time.as_secs_f64() * 1000.0,
-                entities_per_sec
-            );
         }
-
-        Ok(all_hashes)
     }
 
     /// Sequential hashing for small datasets to avoid parallelization overhead
     fn hash_entities_sequential(
         &self,
         sorted_dataset_ids: &[u32],
-        position_map: &std::collections::HashMap<u32, usize>,
+        position_map: &HashMap<u32, usize>,
         interner: &crate::interner::StringInterner,
         algorithm: &str,
-        profiling_data: &Option<Arc<ProfilingData>>,
     ) -> PyResult<Vec<Vec<u8>>> {
-        let mut all_hashes = Vec::with_capacity(self.entities.len());
+        let mut hashes = Vec::with_capacity(self.entities.len());
 
         for entity in &self.entities {
-            let hash = self.hash_single_entity(
+            let hash = self.hash_single_entity_optimized(
                 entity,
                 sorted_dataset_ids,
                 position_map,
                 interner,
                 algorithm,
-                profiling_data,
             )?;
-            all_hashes.push(hash);
+            hashes.push(hash);
         }
 
-        Ok(all_hashes)
+        Ok(hashes)
     }
 
-    /// Chunked parallel hashing to balance parallelism with coordination overhead
-    fn hash_entities_chunked_parallel(
+    /// Chunked parallel hashing for larger datasets  
+    fn hash_entities_parallel(
         &self,
         sorted_dataset_ids: &[u32],
-        position_map: &std::collections::HashMap<u32, usize>,
+        position_map: &HashMap<u32, usize>,
         interner: &crate::interner::StringInterner,
         algorithm: &str,
-        profiling_data: &Option<Arc<ProfilingData>>,
         chunk_size: usize,
     ) -> PyResult<Vec<Vec<u8>>> {
-        use rayon::prelude::*;
+        // Clone data needed for parallel processing
+        let algorithm = algorithm.to_string();
 
-        // Chunk entities and process each chunk in parallel
+        // Process entities in parallel chunks
         let all_hashes: Result<Vec<_>, _> = self
             .entities
             .chunks(chunk_size)
@@ -362,13 +260,12 @@ impl EntityCollection {
             .map(|chunk| -> PyResult<Vec<Vec<u8>>> {
                 let mut chunk_hashes = Vec::with_capacity(chunk.len());
                 for entity in *chunk {
-                    let hash = self.hash_single_entity(
+                    let hash = self.hash_single_entity_optimized(
                         entity,
                         sorted_dataset_ids,
                         position_map,
                         interner,
-                        algorithm,
-                        profiling_data,
+                        &algorithm,
                     )?;
                     chunk_hashes.push(hash);
                 }
@@ -376,170 +273,53 @@ impl EntityCollection {
             })
             .collect();
 
-        // Flatten the chunked results
+        // Flatten chunks into single vector
         let all_hashes = all_hashes?;
-        let flattened: Vec<Vec<u8>> = all_hashes.into_iter().flatten().collect();
-
-        Ok(flattened)
+        Ok(all_hashes.into_iter().flatten().collect())
     }
 
-    /// Hash a single entity with full profiling support
-    fn hash_single_entity(
+    /// Optimized single entity hashing without profiling overhead
+    fn hash_single_entity_optimized(
         &self,
-        entity: &crate::entity::Entity,
+        entity: &Entity,
         _sorted_dataset_ids: &[u32],
-        position_map: &std::collections::HashMap<u32, usize>,
+        position_map: &HashMap<u32, usize>,
         interner: &crate::interner::StringInterner,
         algorithm: &str,
-        profiling_data: &Option<Arc<ProfilingData>>,
     ) -> PyResult<Vec<u8>> {
-        use std::sync::atomic::Ordering;
+        let mut hasher = crate::hash::create_hasher(algorithm)?;
 
-        // 1. Hasher creation timing
-        let hasher_start = std::time::Instant::now();
-        let mut hasher = crate::hash::create_hasher(algorithm).expect("Failed to create hasher");
-        let hasher_time = hasher_start.elapsed();
-
-        if let Some(ref profiling) = profiling_data {
-            profiling
-                .hasher_creation_time
-                .fetch_add(hasher_time.as_nanos() as u64, Ordering::Relaxed);
-        }
-
-        // 2. Get entity data
-        let datasets_map = entity.get_datasets_map();
-        let sorted_records_map = entity.get_sorted_records_map();
-
-        let mut entity_used_fast_path = false;
-
-        // 3. Process datasets in sorted order for deterministic results
-        // OPTIMIZATION: Only iterate through datasets this entity actually has, but maintain the same order
-        let mut entity_datasets: Vec<u32> = datasets_map.keys().copied().collect();
+        // Process datasets in deterministic order using position map
+        let mut entity_datasets: Vec<u32> = entity.get_datasets_map().keys().copied().collect();
         entity_datasets.sort_by_key(|&dataset_id| {
             position_map.get(&dataset_id).copied().unwrap_or(usize::MAX)
         });
 
         for &dataset_id in &entity_datasets {
-            if let Some(bitmap) = datasets_map.get(&dataset_id) {
-                // Bitmap iteration timing
-                let bitmap_start = std::time::Instant::now();
-                let bitmap_size = bitmap.len();
-                let bitmap_time = bitmap_start.elapsed();
-
-                if let Some(ref profiling) = profiling_data {
-                    profiling
-                        .bitmap_iteration_time
-                        .fetch_add(bitmap_time.as_nanos() as u64, Ordering::Relaxed);
-                    profiling
-                        .total_bitmap_iterations
-                        .fetch_add(bitmap_size as usize, Ordering::Relaxed);
-                }
-
-                // String lookup timing for dataset name
-                let lookup_start = std::time::Instant::now();
-                let dataset_str_opt = interner.get_string_fast(dataset_id);
-                let lookup_time = lookup_start.elapsed();
-
-                if let Some(ref profiling) = profiling_data {
-                    profiling
-                        .string_lookup_time
-                        .fetch_add(lookup_time.as_nanos() as u64, Ordering::Relaxed);
-                    profiling
-                        .total_string_lookups
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-
-                if let Some(dataset_str) = dataset_str_opt {
-                    // Hash update timing for dataset name
-                    let hash_start = std::time::Instant::now();
+            if let Some(bitmap) = entity.get_datasets_map().get(&dataset_id) {
+                // Hash dataset name
+                if let Some(dataset_str) = interner.get_string_internal(dataset_id) {
                     hasher.update(dataset_str.as_bytes());
-                    let hash_time = hash_start.elapsed();
 
-                    if let Some(ref profiling) = profiling_data {
-                        profiling
-                            .hash_update_time
-                            .fetch_add(hash_time.as_nanos() as u64, Ordering::Relaxed);
-                        profiling.total_hash_updates.fetch_add(1, Ordering::Relaxed);
-                    }
-
-                    // Process record strings
-                    if let Some(sorted_record_ids) = sorted_records_map.get(&dataset_id) {
-                        // Fast path: use pre-computed sorted order
-                        entity_used_fast_path = true;
-
+                    // Use pre-computed sorted records if available (fast path)
+                    if let Some(sorted_record_ids) = entity.get_sorted_records(dataset_id) {
                         for &record_id in sorted_record_ids {
-                            // String lookup timing for record
-                            let lookup_start = std::time::Instant::now();
-                            let record_str_opt = interner.get_string_fast(record_id);
-                            let lookup_time = lookup_start.elapsed();
-
-                            if let Some(ref profiling) = profiling_data {
-                                profiling
-                                    .string_lookup_time
-                                    .fetch_add(lookup_time.as_nanos() as u64, Ordering::Relaxed);
-                                profiling
-                                    .total_string_lookups
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-
-                            if let Some(record_str) = record_str_opt {
-                                // Hash update timing for record
-                                let hash_start = std::time::Instant::now();
+                            if let Some(record_str) = interner.get_string_internal(record_id) {
                                 hasher.update(record_str.as_bytes());
-                                let hash_time = hash_start.elapsed();
-
-                                if let Some(ref profiling) = profiling_data {
-                                    profiling
-                                        .hash_update_time
-                                        .fetch_add(hash_time.as_nanos() as u64, Ordering::Relaxed);
-                                    profiling.total_hash_updates.fetch_add(1, Ordering::Relaxed);
-                                }
                             }
                         }
                     } else {
-                        // Fallback path: sort by string value for deterministic results
-                        let sort_start = std::time::Instant::now();
+                        // Fallback: sort records on demand
                         let mut record_ids: Vec<u32> = bitmap.iter().collect();
                         record_ids.sort_by(|&a, &b| {
-                            let str_a = interner.get_string_fast(a).unwrap_or("");
-                            let str_b = interner.get_string_fast(b).unwrap_or("");
+                            let str_a = interner.get_string_internal(a).unwrap_or("");
+                            let str_b = interner.get_string_internal(b).unwrap_or("");
                             str_a.cmp(str_b)
                         });
-                        let sort_time = sort_start.elapsed();
-
-                        if let Some(ref profiling) = profiling_data {
-                            profiling
-                                .sorting_time
-                                .fetch_add(sort_time.as_nanos() as u64, Ordering::Relaxed);
-                        }
 
                         for record_id in record_ids {
-                            // String lookup timing for record (fallback path)
-                            let lookup_start = std::time::Instant::now();
-                            let record_str_opt = interner.get_string_fast(record_id);
-                            let lookup_time = lookup_start.elapsed();
-
-                            if let Some(ref profiling) = profiling_data {
-                                profiling
-                                    .string_lookup_time
-                                    .fetch_add(lookup_time.as_nanos() as u64, Ordering::Relaxed);
-                                profiling
-                                    .total_string_lookups
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-
-                            if let Some(record_str) = record_str_opt {
-                                // Hash update timing for record (fallback path)
-                                let hash_start = std::time::Instant::now();
+                            if let Some(record_str) = interner.get_string_internal(record_id) {
                                 hasher.update(record_str.as_bytes());
-                                let hash_time = hash_start.elapsed();
-
-                                if let Some(ref profiling) = profiling_data {
-                                    profiling
-                                        .hash_update_time
-                                        .fetch_add(hash_time.as_nanos() as u64, Ordering::Relaxed);
-                                    profiling.total_hash_updates.fetch_add(1, Ordering::Relaxed);
-                                }
                             }
                         }
                     }
@@ -547,171 +327,7 @@ impl EntityCollection {
             }
         }
 
-        // Update entity path counters
-        if let Some(ref profiling) = profiling_data {
-            if entity_used_fast_path {
-                profiling.fast_path_entities.fetch_add(1, Ordering::Relaxed);
-            } else {
-                profiling.fallback_entities.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        // 4. Finalization timing
-        let finalize_start = std::time::Instant::now();
-        let result = hasher.finalize().to_vec();
-        let finalize_time = finalize_start.elapsed();
-
-        if let Some(ref profiling) = profiling_data {
-            profiling
-                .finalization_time
-                .fetch_add(finalize_time.as_nanos() as u64, Ordering::Relaxed);
-        }
-
-        Ok(result)
-    }
-
-    /// Print detailed profiling information
-    fn print_detailed_profiling(
-        &self,
-        profiling: &ProfilingData,
-        total_time: std::time::Duration,
-        total_entities: usize,
-    ) {
-        use std::sync::atomic::Ordering;
-
-        // Extract profiling data
-        let hasher_creation_ns = profiling.hasher_creation_time.load(Ordering::Relaxed);
-        let string_lookup_ns = profiling.string_lookup_time.load(Ordering::Relaxed);
-        let hash_update_ns = profiling.hash_update_time.load(Ordering::Relaxed);
-        let bitmap_iteration_ns = profiling.bitmap_iteration_time.load(Ordering::Relaxed);
-        let sorting_ns = profiling.sorting_time.load(Ordering::Relaxed);
-        let finalization_ns = profiling.finalization_time.load(Ordering::Relaxed);
-
-        let fast_path_entities = profiling.fast_path_entities.load(Ordering::Relaxed);
-        let fallback_entities = profiling.fallback_entities.load(Ordering::Relaxed);
-        let total_string_lookups = profiling.total_string_lookups.load(Ordering::Relaxed);
-        let total_hash_updates = profiling.total_hash_updates.load(Ordering::Relaxed);
-        let total_bitmap_iterations = profiling.total_bitmap_iterations.load(Ordering::Relaxed);
-
-        let total_ns = total_time.as_nanos() as u64;
-        let entities_per_sec = total_entities as f64 / total_time.as_secs_f64();
-
-        println!("\n🔬 DETAILED PROFILING ANALYSIS");
-        println!("{}", "=".repeat(50));
-
-        println!("\n📊 Overall Performance:");
-        println!(
-            "  {} entities in {:.1}ms ({:.0} entities/sec)",
-            total_entities,
-            total_time.as_secs_f64() * 1000.0,
-            entities_per_sec
-        );
-        println!("  Target: 1,000,000 entities/sec");
-        println!(
-            "  Shortfall: {:.1}x too slow",
-            1_000_000.0 / entities_per_sec
-        );
-
-        println!("\n⏱️  Component Timing Breakdown:");
-        let components = [
-            ("Hasher Creation", hasher_creation_ns),
-            ("String Lookups", string_lookup_ns),
-            ("Hash Updates", hash_update_ns),
-            ("Bitmap Iteration", bitmap_iteration_ns),
-            ("Sorting (fallback)", sorting_ns),
-            ("Finalization", finalization_ns),
-        ];
-
-        for (name, time_ns) in &components {
-            let time_ms = *time_ns as f64 / 1_000_000.0;
-            let percentage = (*time_ns as f64 / total_ns as f64) * 100.0;
-            println!("  {:<18} {:8.1}ms ({:5.1}%)", name, time_ms, percentage);
-        }
-
-        let accounted_ns: u64 = components.iter().map(|(_, ns)| ns).sum();
-        let unaccounted_ns = total_ns.saturating_sub(accounted_ns);
-        let unaccounted_percentage = (unaccounted_ns as f64 / total_ns as f64) * 100.0;
-        println!(
-            "  {:<18} {:8.1}ms ({:5.1}%)",
-            "Other/Overhead",
-            unaccounted_ns as f64 / 1_000_000.0,
-            unaccounted_percentage
-        );
-
-        println!("\n📈 Operation Counters:");
-        println!(
-            "  Fast path entities:   {:>8} ({:5.1}%)",
-            fast_path_entities,
-            (fast_path_entities as f64 / total_entities as f64) * 100.0
-        );
-        println!(
-            "  Fallback entities:    {:>8} ({:5.1}%)",
-            fallback_entities,
-            (fallback_entities as f64 / total_entities as f64) * 100.0
-        );
-        println!(
-            "  String lookups:       {:>8} ({:.1} per entity)",
-            total_string_lookups,
-            total_string_lookups as f64 / total_entities as f64
-        );
-        println!(
-            "  Hash updates:         {:>8} ({:.1} per entity)",
-            total_hash_updates,
-            total_hash_updates as f64 / total_entities as f64
-        );
-        println!(
-            "  Bitmap iterations:    {:>8} ({:.1} per entity)",
-            total_bitmap_iterations,
-            total_bitmap_iterations as f64 / total_entities as f64
-        );
-
-        println!("\n⚡ Performance Analysis:");
-        if string_lookup_ns > total_ns / 4 {
-            println!(
-                "  🚨 STRING LOOKUPS are the major bottleneck ({:.1}% of time)",
-                (string_lookup_ns as f64 / total_ns as f64) * 100.0
-            );
-        }
-        if hash_update_ns > total_ns / 4 {
-            println!(
-                "  🚨 HASH UPDATES are the major bottleneck ({:.1}% of time)",
-                (hash_update_ns as f64 / total_ns as f64) * 100.0
-            );
-        }
-        if sorting_ns > total_ns / 10 {
-            println!(
-                "  ⚠️  SORTING fallback consuming significant time ({:.1}% of time)",
-                (sorting_ns as f64 / total_ns as f64) * 100.0
-            );
-        }
-        if unaccounted_percentage > 20.0 {
-            println!(
-                "  ⚠️  HIGH OVERHEAD: {:.1}% time unaccounted (parallelization/memory overhead)",
-                unaccounted_percentage
-            );
-        }
-
-        // Per-operation timing analysis
-        if total_string_lookups > 0 {
-            let avg_lookup_ns = string_lookup_ns / total_string_lookups as u64;
-            println!(
-                "  String lookup avg:    {:>8.0}ns per lookup",
-                avg_lookup_ns
-            );
-            if avg_lookup_ns > 100 {
-                println!("    🚨 STRING LOOKUPS TOO SLOW (should be <100ns)");
-            }
-        }
-
-        if total_hash_updates > 0 {
-            let avg_hash_ns = hash_update_ns / total_hash_updates as u64;
-            println!("  Hash update avg:      {:>8.0}ns per update", avg_hash_ns);
-            if avg_hash_ns > 1000 {
-                println!("    🚨 HASH UPDATES TOO SLOW (should be <1000ns)");
-            }
-        }
-
-        println!("{}", "=".repeat(50));
+        Ok(hasher.finalize().to_vec())
     }
 
     /// Batch hash all entities returning hex strings for convenience

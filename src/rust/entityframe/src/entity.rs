@@ -1,8 +1,5 @@
-use blake3::Hasher as Blake3Hasher;
 use pyo3::prelude::*;
 use roaring::RoaringBitmap;
-use sha2::{Digest, Sha256, Sha512};
-use sha3::{Sha3_256, Sha3_512};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
@@ -311,69 +308,33 @@ impl Entity {
 
     /// Compute deterministic hash of the entity using specified algorithm.
     /// Uses pre-computed sorted order for optimal performance.
-    /// Fast path optimised for individual entity hashing.
     pub fn deterministic_hash(
         &self,
         interner: &mut crate::interner::StringInterner,
         algorithm: &str,
     ) -> PyResult<Vec<u8>> {
-        // Get sorted dataset IDs from interner and clone to avoid borrow issues
+        // Use unified hasher from hash module
+        let mut hasher = crate::hash::create_hasher(algorithm)?;
+
+        // Get sorted dataset IDs from interner for deterministic order
         let sorted_dataset_ids = interner.get_sorted_ids().to_vec();
 
-        // Use fast enum-based hasher (avoid dynamic dispatch overhead)
-        enum HasherType {
-            Sha256(Sha256),
-            Sha512(Sha512),
-            Sha3_256(Sha3_256),
-            Sha3_512(Sha3_512),
-            Blake3(Box<Blake3Hasher>),
-        }
-
-        let mut hasher = match algorithm.to_lowercase().as_str() {
-            "sha256" => HasherType::Sha256(Sha256::new()),
-            "sha512" => HasherType::Sha512(Sha512::new()),
-            "sha3-256" => HasherType::Sha3_256(Sha3_256::new()),
-            "sha3-512" => HasherType::Sha3_512(Sha3_512::new()),
-            "blake3" => HasherType::Blake3(Box::new(Blake3Hasher::new())),
-            _ => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    format!("Unsupported hash algorithm: {}. Supported: sha256, sha512, sha3-256, sha3-512, blake3", algorithm)
-                ));
-            }
-        };
-
-        // Process datasets in sorted order with direct string access
+        // Process datasets in sorted order
         for &dataset_id in &sorted_dataset_ids {
             if let Some(bitmap) = self.datasets.get(&dataset_id) {
-                // Direct string lookup (fast array access)
+                // Hash dataset name
                 let dataset_str = interner.get_string(dataset_id)?;
-                match &mut hasher {
-                    HasherType::Sha256(h) => h.update(dataset_str.as_bytes()),
-                    HasherType::Sha512(h) => h.update(dataset_str.as_bytes()),
-                    HasherType::Sha3_256(h) => h.update(dataset_str.as_bytes()),
-                    HasherType::Sha3_512(h) => h.update(dataset_str.as_bytes()),
-                    HasherType::Blake3(h) => {
-                        h.update(dataset_str.as_bytes());
-                    }
-                }
+                hasher.update(dataset_str.as_bytes());
 
-                // Use pre-computed sorted record order (avoiding O(R log R) cost!)
+                // Use pre-computed sorted record order if available
                 if let Some(sorted_record_ids) = self.get_sorted_records(dataset_id) {
-                    // Hash each record string in pre-computed order
+                    // Fast path: use pre-sorted records
                     for &record_id in sorted_record_ids {
                         let record_str = interner.get_string(record_id)?;
-                        match &mut hasher {
-                            HasherType::Sha256(h) => h.update(record_str.as_bytes()),
-                            HasherType::Sha512(h) => h.update(record_str.as_bytes()),
-                            HasherType::Sha3_256(h) => h.update(record_str.as_bytes()),
-                            HasherType::Sha3_512(h) => h.update(record_str.as_bytes()),
-                            HasherType::Blake3(h) => {
-                                h.update(record_str.as_bytes());
-                            }
-                        }
+                        hasher.update(record_str.as_bytes());
                     }
                 } else {
-                    // Fallback if sorted records are missing for this dataset
+                    // Fallback: sort records on demand
                     let mut record_ids: Vec<u32> = bitmap.iter().collect();
                     record_ids.sort_by(|&a, &b| {
                         let str_a = interner.get_string_internal(a).unwrap_or("");
@@ -383,28 +344,14 @@ impl Entity {
 
                     for record_id in record_ids {
                         let record_str = interner.get_string(record_id)?;
-                        match &mut hasher {
-                            HasherType::Sha256(h) => h.update(record_str.as_bytes()),
-                            HasherType::Sha512(h) => h.update(record_str.as_bytes()),
-                            HasherType::Sha3_256(h) => h.update(record_str.as_bytes()),
-                            HasherType::Sha3_512(h) => h.update(record_str.as_bytes()),
-                            HasherType::Blake3(h) => {
-                                h.update(record_str.as_bytes());
-                            }
-                        }
+                        hasher.update(record_str.as_bytes());
                     }
                 }
             }
         }
 
-        // Finalise and return hash
-        Ok(match hasher {
-            HasherType::Sha256(h) => h.finalize().to_vec(),
-            HasherType::Sha512(h) => h.finalize().to_vec(),
-            HasherType::Sha3_256(h) => h.finalize().to_vec(),
-            HasherType::Sha3_512(h) => h.finalize().to_vec(),
-            HasherType::Blake3(h) => h.finalize().as_bytes().to_vec(),
-        })
+        // Finalize and return hash
+        Ok(hasher.finalize().to_vec())
     }
 }
 
