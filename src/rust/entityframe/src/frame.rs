@@ -280,6 +280,33 @@ impl EntityFrame {
         })
     }
 
+    /// Batch hash all entities in a collection with detailed profiling
+    #[pyo3(signature = (collection_name, algorithm = "sha256"))]
+    pub fn hash_collection_profiling(
+        &mut self,
+        collection_name: &str,
+        algorithm: &str,
+    ) -> PyResult<Vec<Py<PyBytes>>> {
+        let collection = self.collections.get(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        // Use collection's batch hashing method with profiling enabled
+        let hashes = collection.hash_all_entities_profiling(&mut self.interner, algorithm)?;
+
+        // Convert to PyBytes for Python
+        Python::with_gil(|py| {
+            let py_hashes = hashes
+                .into_iter()
+                .map(|h| PyBytes::new(py, &h).into())
+                .collect();
+            Ok(py_hashes)
+        })
+    }
+
     /// Batch hash all entities in a collection returning hex strings
     #[pyo3(signature = (collection_name, algorithm = "sha256"))]
     pub fn hash_collection_hex(
@@ -296,6 +323,29 @@ impl EntityFrame {
 
         // Use collection's batch hashing method
         collection.hash_all_entities_hex(&mut self.interner, algorithm)
+    }
+
+    /// Batch hash all entities in a collection returning concatenated bytes
+    /// This is much faster than individual PyBytes objects
+    #[pyo3(signature = (collection_name, algorithm = "sha256"))]
+    pub fn hash_collection_raw(
+        &mut self,
+        collection_name: &str,
+        algorithm: &str,
+    ) -> PyResult<Py<PyBytes>> {
+        let collection = self.collections.get(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        // Use collection's concatenated hashing method
+        let concatenated_bytes =
+            collection.hash_all_entities_concatenated(&mut self.interner, algorithm)?;
+
+        // Return as single PyBytes object
+        Python::with_gil(|py| Ok(PyBytes::new(py, &concatenated_bytes).into()))
     }
 
     /// Batch hash all entities across all collections
