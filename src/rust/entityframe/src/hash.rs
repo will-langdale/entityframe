@@ -101,39 +101,6 @@ pub fn create_hasher(algorithm: &str) -> PyResult<Box<dyn DynDigest>> {
     }
 }
 
-/// Collect all unique string IDs needed for a batch of entities
-pub fn collect_string_ids(
-    entities: &[&crate::entity::Entity],
-    sorted_dataset_ids: &[u32],
-) -> Vec<u32> {
-    let mut string_ids = std::collections::HashSet::new();
-
-    // Add all dataset IDs
-    for &dataset_id in sorted_dataset_ids {
-        string_ids.insert(dataset_id);
-    }
-
-    // Add all record IDs from all entities
-    for entity in entities {
-        for dataset_id in entity.get_dataset_ids() {
-            string_ids.insert(dataset_id);
-
-            if let Some(sorted_records) = entity.get_sorted_records(dataset_id) {
-                for &record_id in sorted_records {
-                    string_ids.insert(record_id);
-                }
-            } else {
-                // Fallback: get record IDs from bitmap
-                for record_id in entity.get_records_by_id(dataset_id) {
-                    string_ids.insert(record_id);
-                }
-            }
-        }
-    }
-
-    string_ids.into_iter().collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

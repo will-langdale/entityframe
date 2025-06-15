@@ -185,81 +185,76 @@ impl EntityCollection {
             return Ok(Vec::new());
         }
 
-        const CHUNK_SIZE: usize = 10_000; // Smaller chunks for better parallelization
-
         // Get sorted dataset IDs from interner
         let sorted_dataset_ids = interner.get_sorted_ids().to_vec();
 
-        // Process in chunks for memory efficiency and parallelization
-        let mut all_results = Vec::with_capacity(self.entities.len());
+        // Clone algorithm string for parallel use (avoid borrow issues)
+        let algo = algorithm.to_string();
 
-        for chunk in self.entities.chunks(CHUNK_SIZE) {
-            // Collect all string IDs needed for this chunk
-            let entity_refs: Vec<_> = chunk.iter().collect();
-            let string_ids = crate::hash::collect_string_ids(&entity_refs, &sorted_dataset_ids);
+        // Direct parallel hashing - no buffer building needed!
+        let hash_start = std::time::Instant::now();
 
-            // Single bulk string lookup for the chunk
-            let string_cache = interner.bulk_get_strings(&string_ids);
+        let all_hashes: Vec<Vec<u8>> = self
+            .entities
+            .par_iter()
+            .map(|entity| {
+                let mut hasher =
+                    crate::hash::create_hasher(&algo).expect("Failed to create hasher");
 
-            // Build massive buffer for entire chunk
-            // Pre-calculate total size for better allocation
-            let estimated_size = chunk.len() * 1024 + string_cache.len() * 20;
-            let mut chunk_buffer = String::with_capacity(estimated_size);
-            let mut entity_ranges = Vec::with_capacity(chunk.len());
-
-            // Build buffer with all entity strings
-            for entity in chunk {
-                let start = chunk_buffer.len();
-
-                // Get entity's datasets map once
-                let datasets_map = entity.get_datasets_map();
-                let sorted_records_map = entity.get_sorted_records_map();
-
-                // Process datasets in sorted order
+                // Process datasets in sorted order for deterministic results
                 for &dataset_id in &sorted_dataset_ids {
-                    if datasets_map.contains_key(&dataset_id) {
-                        // Add dataset string (no Option check - we know it exists)
-                        chunk_buffer.push_str(string_cache[&dataset_id]);
-                        chunk_buffer.push('|');
+                    if let Some(bitmap) = entity.get_datasets_map().get(&dataset_id) {
+                        // Hash dataset name
+                        let dataset_str = interner
+                            .get_string(dataset_id)
+                            .expect("Dataset ID should exist in interner");
+                        hasher.update(dataset_str.as_bytes());
 
-                        // Add sorted records
-                        if let Some(sorted_record_ids) = sorted_records_map.get(&dataset_id) {
-                            for &record_id in sorted_record_ids {
-                                // Direct lookup - skip Option check since we pre-fetched all strings
-                                if let Some(&record_str) = string_cache.get(&record_id) {
-                                    chunk_buffer.push_str(record_str);
-                                    chunk_buffer.push('|');
-                                }
-                            }
+                        // Get sorted records - either pre-computed or compute on-demand
+                        let record_ids = if let Some(sorted_record_ids) =
+                            entity.get_sorted_records_map().get(&dataset_id)
+                        {
+                            // Use pre-computed sorted order
+                            sorted_record_ids.clone()
+                        } else {
+                            // Sort by string value for deterministic results
+                            let mut record_ids: Vec<u32> = bitmap.iter().collect();
+                            record_ids.sort_by(|&a, &b| {
+                                let str_a = interner.get_string_internal(a).unwrap_or("");
+                                let str_b = interner.get_string_internal(b).unwrap_or("");
+                                str_a.cmp(str_b)
+                            });
+                            record_ids
+                        };
+
+                        // Hash sorted record strings
+                        for record_id in record_ids {
+                            let record_str = interner
+                                .get_string(record_id)
+                                .expect("Record ID should exist in interner");
+                            hasher.update(record_str.as_bytes());
                         }
                     }
                 }
 
-                let end = chunk_buffer.len();
-                entity_ranges.push((start, end));
-            }
+                hasher.finalize().to_vec()
+            })
+            .collect();
 
-            // Convert buffer to bytes once for all parallel operations
-            let buffer_bytes = chunk_buffer.into_bytes();
+        let hash_time = hash_start.elapsed();
 
-            // Clone algorithm string for parallel use (avoids borrow issues)
-            let algo = algorithm.to_string();
+        // Performance logging
+        let total_entities = self.entities.len();
+        let entities_per_sec = total_entities as f64 / hash_time.as_secs_f64();
+        println!("Direct hashing performance:");
+        println!(
+            "  {} entities in {:.1}ms ({:.0} entities/sec)",
+            total_entities,
+            hash_time.as_secs_f64() * 1000.0,
+            entities_per_sec
+        );
 
-            // Parallel hash buffer slices
-            let chunk_hashes: Vec<Vec<u8>> = entity_ranges
-                .par_iter()
-                .map(|(start, end)| {
-                    let mut hasher =
-                        crate::hash::create_hasher(&algo).expect("Failed to create hasher");
-                    hasher.update(&buffer_bytes[*start..*end]);
-                    hasher.finalize().to_vec()
-                })
-                .collect();
-
-            all_results.extend(chunk_hashes);
-        }
-
-        Ok(all_results)
+        Ok(all_hashes)
     }
 
     /// Batch hash all entities returning hex strings for convenience
