@@ -81,6 +81,26 @@ impl StringInterner {
         self.strings.get(id as usize).map(|s| s.as_ref())
     }
 
+    /// Fast unsafe string access for high-performance scenarios
+    /// Only use when you're certain the ID is valid
+    ///
+    /// # Safety
+    /// The caller must ensure that `id` is a valid index into the strings vector.
+    /// Using an invalid ID will result in undefined behavior.
+    pub unsafe fn get_string_unchecked(&self, id: u32) -> &str {
+        self.strings.get_unchecked(id as usize).as_ref()
+    }
+
+    /// Get string with bounds checking but optimized for hot paths
+    pub fn get_string_fast(&self, id: u32) -> Option<&str> {
+        // Direct array access - should be fastest possible
+        if (id as usize) < self.strings.len() {
+            Some(unsafe { self.get_string_unchecked(id) })
+        } else {
+            None
+        }
+    }
+
     /// Bulk string lookup for batch processing optimisation
     /// Returns HashMap mapping IDs to their string values
     pub fn bulk_get_strings(&self, ids: &[u32]) -> std::collections::HashMap<u32, &str> {

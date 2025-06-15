@@ -185,54 +185,56 @@ impl EntityCollection {
             return Ok(Vec::new());
         }
 
-        // Get sorted dataset IDs from interner
+        // Get sorted dataset IDs from interner (one-time cost)
         let sorted_dataset_ids = interner.get_sorted_ids().to_vec();
 
-        // Clone algorithm string for parallel use (avoid borrow issues)
+        // Clone algorithm string for parallel use
         let algo = algorithm.to_string();
 
-        // Direct parallel hashing - no buffer building needed!
-        let hash_start = std::time::Instant::now();
-
+        // Simple parallel hashing - let each entity do its own string lookups
+        let total_start = std::time::Instant::now();
         let all_hashes: Vec<Vec<u8>> = self
             .entities
             .par_iter()
             .map(|entity| {
+                // Create hasher
                 let mut hasher =
                     crate::hash::create_hasher(&algo).expect("Failed to create hasher");
 
+                // Get entity data
+                let datasets_map = entity.get_datasets_map();
+                let sorted_records_map = entity.get_sorted_records_map();
+
                 // Process datasets in sorted order for deterministic results
                 for &dataset_id in &sorted_dataset_ids {
-                    if let Some(bitmap) = entity.get_datasets_map().get(&dataset_id) {
-                        // Hash dataset name
-                        let dataset_str = interner
-                            .get_string(dataset_id)
-                            .expect("Dataset ID should exist in interner");
-                        hasher.update(dataset_str.as_bytes());
+                    if let Some(bitmap) = datasets_map.get(&dataset_id) {
+                        // Fast string lookup from interner
+                        if let Some(dataset_str) = interner.get_string_fast(dataset_id) {
+                            hasher.update(dataset_str.as_bytes());
 
-                        // Get sorted records - either pre-computed or compute on-demand
-                        let record_ids = if let Some(sorted_record_ids) =
-                            entity.get_sorted_records_map().get(&dataset_id)
-                        {
-                            // Use pre-computed sorted order
-                            sorted_record_ids.clone()
-                        } else {
-                            // Sort by string value for deterministic results
-                            let mut record_ids: Vec<u32> = bitmap.iter().collect();
-                            record_ids.sort_by(|&a, &b| {
-                                let str_a = interner.get_string_internal(a).unwrap_or("");
-                                let str_b = interner.get_string_internal(b).unwrap_or("");
-                                str_a.cmp(str_b)
-                            });
-                            record_ids
-                        };
+                            // Hash sorted record strings directly (avoid cloning)
+                            if let Some(sorted_record_ids) = sorted_records_map.get(&dataset_id) {
+                                // Use pre-computed sorted order (fast path - no cloning!)
+                                for &record_id in sorted_record_ids {
+                                    if let Some(record_str) = interner.get_string_fast(record_id) {
+                                        hasher.update(record_str.as_bytes());
+                                    }
+                                }
+                            } else {
+                                // Sort by string value for deterministic results (fallback)
+                                let mut record_ids: Vec<u32> = bitmap.iter().collect();
+                                record_ids.sort_by(|&a, &b| {
+                                    let str_a = interner.get_string_fast(a).unwrap_or("");
+                                    let str_b = interner.get_string_fast(b).unwrap_or("");
+                                    str_a.cmp(str_b)
+                                });
 
-                        // Hash sorted record strings
-                        for record_id in record_ids {
-                            let record_str = interner
-                                .get_string(record_id)
-                                .expect("Record ID should exist in interner");
-                            hasher.update(record_str.as_bytes());
+                                for record_id in record_ids {
+                                    if let Some(record_str) = interner.get_string_fast(record_id) {
+                                        hasher.update(record_str.as_bytes());
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -241,16 +243,17 @@ impl EntityCollection {
             })
             .collect();
 
-        let hash_time = hash_start.elapsed();
+        let total_time = total_start.elapsed();
 
         // Performance logging
         let total_entities = self.entities.len();
-        let entities_per_sec = total_entities as f64 / hash_time.as_secs_f64();
-        println!("Direct hashing performance:");
+        let entities_per_sec = total_entities as f64 / total_time.as_secs_f64();
+
+        println!("\nSimple parallel hashing performance:");
         println!(
             "  {} entities in {:.1}ms ({:.0} entities/sec)",
             total_entities,
-            hash_time.as_secs_f64() * 1000.0,
+            total_time.as_secs_f64() * 1000.0,
             entities_per_sec
         );
 
