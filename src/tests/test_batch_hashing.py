@@ -1,20 +1,18 @@
 """
-Bulletproof batch hashing tests.
-Simple, reliable tests that complete quickly and provide useful data.
+Batch hashing functionality tests.
+Tests core batch hashing functionality, consistency, and correctness.
+Performance tests have been moved to benchmarks/
 """
 
-import time
 from entityframe import EntityFrame
 
 
 class TestBatchHashing:
-    """Test batch hashing with simple, reliable tests."""
+    """Test batch hashing functionality and correctness."""
 
     def test_basic_batch_functionality(self):
         """Test that batch hashing works correctly with simple entities."""
-        print("\n✅ Testing basic batch hashing functionality...")
-
-        # Simple, small test for reliability
+        # Simple test data
         entities = [
             {"users": ["alice", "bob"], "orders": ["order_1"]},
             {"users": ["charlie"], "orders": ["order_2", "order_3"]},
@@ -33,128 +31,93 @@ class TestBatchHashing:
             hash_bytes = frame.hash_entity("basic_test", i, "sha256")
             individual_hashes.append(hash_bytes)
 
-        # Verify consistency
+        # Verify consistency between batch and individual hashing
         assert len(batch_hashes) == len(individual_hashes) == len(entities)
-        print(f"   • Generated {len(batch_hashes)} consistent hashes")
+
+        # Note: We can't directly compare PyBytes objects in tests easily,
+        # but we can verify they're the same type and count
+        for batch_hash, individual_hash in zip(batch_hashes, individual_hashes):
+            assert isinstance(batch_hash, type(individual_hash))
+            assert len(bytes(batch_hash)) == len(bytes(individual_hash))
 
         # Test different algorithms produce different results
         blake3_hashes = frame.hash_collection("basic_test", "blake3")
-        assert batch_hashes != blake3_hashes
-        print("   • Different algorithms produce different hashes ✓")
+        assert len(blake3_hashes) == len(batch_hashes)
 
-    def test_small_scale_performance(self):
-        """Test performance at small, reliable scales."""
-        print("\n⚡ Testing small-scale performance...")
-
-        scales = [100, 500, 1000]
-
-        for count in scales:
-            # Simple entities for consistent testing
-            entities = []
-            for i in range(count):
-                entity = {"users": [f"user_{i}", f"u{i}"], "orders": [f"order_{i}"]}
-                entities.append(entity)
-
-            frame = EntityFrame()
-            frame.add_method("perf_test", entities)
-
-            # Test batch hashing
-            start = time.time()
-            hashes = frame.hash_collection("perf_test", "blake3")
-            elapsed = time.time() - start
-
-            rate = count / elapsed if elapsed > 0 else 0
-
-            print(f"   • {count:,} entities: {rate:,.0f} entities/sec ({elapsed:.3f}s)")
-
-            # Basic performance assertion
-            assert rate > 50, f"Should achieve >50 entities/sec, got {rate:.0f}"
-            assert len(hashes) == count
-
-    def test_batch_vs_individual_comparison(self):
-        """Compare batch vs individual hashing at reasonable scale."""
-        print("\n🔄 Testing batch vs individual hashing comparison...")
-
-        count = 500  # Reasonable size for both approaches
-
-        # Simple entities
-        entities = [{"users": [f"u{i}"], "data": [f"d{i}"]} for i in range(count)]
+    def test_batch_vs_individual_consistency(self):
+        """Test that batch and individual hashing produce consistent results."""
+        entities = [{"users": [f"u{i}"], "data": [f"d{i}"]} for i in range(10)]
 
         frame = EntityFrame()
-        frame.add_method("comparison", entities)
+        frame.add_method("consistency_test", entities)
 
-        # Test individual hashing (sample for speed)
-        sample_size = min(100, count)
-        individual_start = time.time()
-        for i in range(sample_size):
-            frame.hash_entity("comparison", i, "sha256")
-        individual_time = time.time() - individual_start
-        individual_rate = sample_size / individual_time if individual_time > 0 else 0
+        # Get batch results
+        batch_hashes = frame.hash_collection_hex("consistency_test", "sha256")
 
-        # Test batch hashing (full dataset)
-        batch_start = time.time()
-        batch_hashes = frame.hash_collection("comparison", "sha256")
-        batch_time = time.time() - batch_start
-        batch_rate = count / batch_time if batch_time > 0 else 0
+        # Get individual results
+        individual_hashes = []
+        for i in range(len(entities)):
+            hash_bytes = frame.hash_entity("consistency_test", i, "sha256")
+            individual_hashes.append(bytes(hash_bytes).hex())
 
-        print(
-            f"   • Individual: {individual_rate:,.0f} entities/sec (sample of {sample_size})"
-        )
-        print(f"   • Batch: {batch_rate:,.0f} entities/sec (full {count})")
+        # Should be identical
+        assert len(batch_hashes) == len(individual_hashes)
+        for batch_hash, individual_hash in zip(batch_hashes, individual_hashes):
+            assert (
+                batch_hash == individual_hash
+            ), "Batch and individual hashing should be consistent"
 
-        # Both should be reasonably fast
-        assert (
-            individual_rate > 50
-        ), f"Individual hashing too slow: {individual_rate:.0f}/sec"
-        assert batch_rate > 100, f"Batch hashing too slow: {batch_rate:.0f}/sec"
-        assert len(batch_hashes) == count
-
-    def test_algorithm_comparison(self):
-        """Test different algorithms at consistent scale."""
-        print("\n🔬 Testing algorithm performance comparison...")
-
-        count = 200
-        entities = [{"users": [f"u{i}"], "orders": [f"o{i}"]} for i in range(count)]
+    def test_algorithm_correctness(self):
+        """Test different algorithms work correctly and produce different results."""
+        entities = [{"users": [f"u{i}"], "orders": [f"o{i}"]} for i in range(5)]
 
         frame = EntityFrame()
         frame.add_method("algo_test", entities)
 
-        algorithms = ["sha256", "blake3", "sha3-256"]
+        algorithms = ["sha256", "blake3", "sha3-256", "sha512"]
         results = {}
 
+        # Test each algorithm
         for algorithm in algorithms:
-            start = time.time()
-            hashes = frame.hash_collection("algo_test", algorithm)
-            elapsed = time.time() - start
+            hashes = frame.hash_collection_hex("algo_test", algorithm)
+            results[algorithm] = hashes
 
-            rate = count / elapsed if elapsed > 0 else 0
-            results[algorithm] = rate
+            assert len(hashes) == len(entities)
 
-            print(f"   • {algorithm}: {rate:,.0f} entities/sec ({elapsed:.3f}s)")
-
-            assert len(hashes) == count
-            assert rate > 50, f"{algorithm} too slow: {rate:.0f}/sec"
+            # Verify hash format based on algorithm
+            if algorithm == "sha256":
+                assert all(
+                    len(h) == 64 for h in hashes
+                ), "SHA-256 should be 64 hex chars"
+            elif algorithm == "sha512":
+                assert all(
+                    len(h) == 128 for h in hashes
+                ), "SHA-512 should be 128 hex chars"
+            elif algorithm == "blake3":
+                assert all(
+                    len(h) == 64 for h in hashes
+                ), "BLAKE3 should be 64 hex chars (32 bytes)"
 
         # Verify algorithms produce different results
-        sha256_hashes = frame.hash_collection("algo_test", "sha256")
-        blake3_hashes = frame.hash_collection("algo_test", "blake3")
-        assert sha256_hashes != blake3_hashes
+        assert (
+            results["sha256"] != results["blake3"]
+        ), "Different algorithms should produce different hashes"
+        assert (
+            results["sha256"] != results["sha512"]
+        ), "Different algorithms should produce different hashes"
 
-        print("   • All algorithms working correctly ✓")
-
-    def test_hex_output_format(self):
-        """Test hex string output format."""
-        print("\n📝 Testing hex output format...")
-
-        entities = [{"users": [f"u{i}"]} for i in range(50)]
+    def test_output_format_consistency(self):
+        """Test different output formats work correctly and consistently."""
+        entities = [{"users": [f"u{i}"]} for i in range(5)]
         frame = EntityFrame()
-        frame.add_method("hex_test", entities)
+        frame.add_method("format_test", entities)
 
-        # Test hex batch hashing
-        hex_hashes = frame.hash_collection_hex("hex_test", "sha256")
-        bytes_hashes = frame.hash_collection("hex_test", "sha256")
+        # Test different output formats
+        bytes_hashes = frame.hash_collection("format_test", "sha256")
+        hex_hashes = frame.hash_collection_hex("format_test", "sha256")
+        raw_bytes = frame.hash_collection_raw("format_test", "sha256")
 
-        assert len(hex_hashes) == len(bytes_hashes) == len(entities)
+        assert len(bytes_hashes) == len(hex_hashes) == len(entities)
 
         # Verify hex format (SHA-256 = 32 bytes = 64 hex chars)
         for hex_hash in hex_hashes:
@@ -166,23 +129,45 @@ class TestBatchHashing:
             ), "Invalid hex characters"
 
         # Test consistency between hex and bytes
-        for hex_hash, bytes_hash in zip(hex_hashes, bytes_hashes):
-            assert hex_hash == bytes_hash.hex(), "Hex/bytes mismatch"
+        for bytes_hash, hex_hash in zip(bytes_hashes, hex_hashes):
+            assert hex_hash == bytes(bytes_hash).hex(), "Hex/bytes format mismatch"
 
-        print(f"   • {len(hex_hashes)} hex hashes verified ✓")
+        # Verify raw bytes format has reasonable size
+        assert (
+            len(bytes(raw_bytes)) > len(entities) * 30
+        ), "Raw bytes should contain hash data"
 
-    def test_memory_efficiency(self):
-        """Test memory efficiency with string overlap."""
-        print("\n💾 Testing memory efficiency...")
+    def test_deterministic_hashing(self):
+        """Test that hashing is deterministic and order-independent."""
+        # Same data in different orders
+        entities1 = [{"customers": ["c3", "c1", "c2"], "orders": ["o2", "o1"]}]
+        entities2 = [{"customers": ["c1", "c2", "c3"], "orders": ["o1", "o2"]}]
 
-        count = 2000
-        overlap_ratio = 0.7  # 70% shared strings
+        frame1 = EntityFrame()
+        frame1.add_method("test1", entities1)
+
+        frame2 = EntityFrame()
+        frame2.add_method("test2", entities2)
+
+        # Hash multiple times
+        hash1_run1 = frame1.hash_collection_hex("test1", "sha256")
+        hash1_run2 = frame1.hash_collection_hex("test1", "sha256")
+        hash2_run1 = frame2.hash_collection_hex("test2", "sha256")
+
+        # Should be deterministic and order-independent
+        assert hash1_run1 == hash1_run2, "Hashing should be deterministic"
+        assert hash1_run1 == hash2_run1, "Hashing should be order-independent"
+
+    def test_string_interning_efficiency(self):
+        """Test that string interning provides memory efficiency."""
+        count = 100
+        overlap_ratio = 0.8  # 80% shared strings
 
         entities = []
         for i in range(count):
             if i < count * overlap_ratio:
                 # Shared strings (cycle through patterns)
-                base = i % 100
+                base = i % 10  # Only 10 unique patterns
                 entity = {
                     "users": [f"shared_user_{base}"],
                     "data": [f"shared_data_{base}"],
@@ -193,14 +178,11 @@ class TestBatchHashing:
             entities.append(entity)
 
         frame = EntityFrame()
-        frame.add_method("memory_test", entities)
+        frame.add_method("interning_test", entities)
 
-        # Test hashing
-        start = time.time()
-        hashes = frame.hash_collection("memory_test", "blake3")
-        elapsed = time.time() - start
-
-        rate = count / elapsed if elapsed > 0 else 0
+        # Test hashing works
+        hashes = frame.hash_collection_hex("interning_test", "blake3")
+        assert len(hashes) == count
 
         # Calculate memory efficiency
         interner_size = frame.interner_size()
@@ -209,14 +191,7 @@ class TestBatchHashing:
             theoretical_strings / interner_size if interner_size > 0 else 1
         )
 
-        print(f"   • Hashed {count:,} entities: {rate:,.0f} entities/sec")
-        print(
-            f"   • String compression: {compression_ratio:.1f}x ({theoretical_strings:,} → {interner_size:,})"
-        )
-        print(f"   • Memory savings: {(1 - interner_size/theoretical_strings):.1%}")
-
-        assert len(hashes) == count
-        assert rate > 100, f"Performance too slow: {rate:.0f}/sec"
+        # Should achieve significant compression due to string overlap
         assert (
-            compression_ratio > 1.5
-        ), f"Insufficient compression: {compression_ratio:.1f}x"
+            compression_ratio > 2.0
+        ), f"String interning should provide >2x compression, got {compression_ratio:.1f}x"

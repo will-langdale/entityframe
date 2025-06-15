@@ -252,6 +252,13 @@ impl EntityCollection {
         let total_start = std::time::Instant::now();
         let total_entities = self.entities.len();
 
+        // Pre-compute position mapping once for all entities (major optimization)
+        let position_map: std::collections::HashMap<u32, usize> = sorted_dataset_ids
+            .iter()
+            .enumerate()
+            .map(|(pos, &id)| (id, pos))
+            .collect();
+
         // Adaptive parallelization strategy based on over-parallelization analysis
         let all_hashes = if total_entities < 1000 {
             // Single-threaded for small datasets to avoid thread coordination overhead
@@ -261,7 +268,13 @@ impl EntityCollection {
                     total_entities
                 );
             }
-            self.hash_entities_sequential(&sorted_dataset_ids, interner, &algo, &profiling_data)
+            self.hash_entities_sequential(
+                &sorted_dataset_ids,
+                &position_map,
+                interner,
+                &algo,
+                &profiling_data,
+            )
         } else {
             // Chunked parallel processing for larger datasets
             let optimal_chunk_size =
@@ -274,6 +287,7 @@ impl EntityCollection {
             }
             self.hash_entities_chunked_parallel(
                 &sorted_dataset_ids,
+                &position_map,
                 interner,
                 &algo,
                 &profiling_data,
@@ -305,6 +319,7 @@ impl EntityCollection {
     fn hash_entities_sequential(
         &self,
         sorted_dataset_ids: &[u32],
+        position_map: &std::collections::HashMap<u32, usize>,
         interner: &crate::interner::StringInterner,
         algorithm: &str,
         profiling_data: &Option<Arc<ProfilingData>>,
@@ -315,6 +330,7 @@ impl EntityCollection {
             let hash = self.hash_single_entity(
                 entity,
                 sorted_dataset_ids,
+                position_map,
                 interner,
                 algorithm,
                 profiling_data,
@@ -329,6 +345,7 @@ impl EntityCollection {
     fn hash_entities_chunked_parallel(
         &self,
         sorted_dataset_ids: &[u32],
+        position_map: &std::collections::HashMap<u32, usize>,
         interner: &crate::interner::StringInterner,
         algorithm: &str,
         profiling_data: &Option<Arc<ProfilingData>>,
@@ -348,6 +365,7 @@ impl EntityCollection {
                     let hash = self.hash_single_entity(
                         entity,
                         sorted_dataset_ids,
+                        position_map,
                         interner,
                         algorithm,
                         profiling_data,
@@ -369,7 +387,8 @@ impl EntityCollection {
     fn hash_single_entity(
         &self,
         entity: &crate::entity::Entity,
-        sorted_dataset_ids: &[u32],
+        _sorted_dataset_ids: &[u32],
+        position_map: &std::collections::HashMap<u32, usize>,
         interner: &crate::interner::StringInterner,
         algorithm: &str,
         profiling_data: &Option<Arc<ProfilingData>>,
@@ -394,15 +413,10 @@ impl EntityCollection {
         let mut entity_used_fast_path = false;
 
         // 3. Process datasets in sorted order for deterministic results
-        // OPTIMIZATION: Only iterate through datasets that this entity actually has
-        // Create a small filtered list instead of checking all global dataset IDs
+        // OPTIMIZATION: Only iterate through datasets this entity actually has, but maintain the same order
         let mut entity_datasets: Vec<u32> = datasets_map.keys().copied().collect();
-        // Sort using the global order by finding positions (cached lookup would be better)
-        entity_datasets.sort_by(|&a, &b| {
-            // Find positions in the sorted array - this maintains deterministic order
-            let pos_a = sorted_dataset_ids.binary_search(&a).unwrap_or(usize::MAX);
-            let pos_b = sorted_dataset_ids.binary_search(&b).unwrap_or(usize::MAX);
-            pos_a.cmp(&pos_b)
+        entity_datasets.sort_by_key(|&dataset_id| {
+            position_map.get(&dataset_id).copied().unwrap_or(usize::MAX)
         });
 
         for &dataset_id in &entity_datasets {

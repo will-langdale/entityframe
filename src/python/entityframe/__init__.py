@@ -5,7 +5,7 @@ This package provides high-performance entity resolution evaluation using a thre
 architecture: string interning, roaring bitmaps, and entity hashing.
 """
 
-from ._rust import StringInterner, Entity, EntityCollection, EntityFrame
+from .entityframe import StringInterner, Entity, EntityCollection, EntityFrame
 from .entity_wrapper import EntityWrapper
 
 

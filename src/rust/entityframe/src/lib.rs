@@ -13,7 +13,7 @@ pub use interner::StringInterner;
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn entityframe(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<StringInterner>()?;
     m.add_class::<Entity>()?;
     m.add_class::<EntityCollection>()?;
