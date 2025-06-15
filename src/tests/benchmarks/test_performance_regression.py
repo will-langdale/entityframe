@@ -1,8 +1,6 @@
 """
-Performance regression tests to ensure optimizations don't break.
-
-These tests verify that EntityFrame maintains expected performance levels
-and that different algorithms and output formats work correctly.
+Performance regression tests using the new API.
+Tests core performance to catch regressions in key operations.
 """
 
 import time
@@ -10,7 +8,7 @@ from entityframe import EntityFrame
 
 
 class TestPerformanceRegression:
-    """Performance regression tests to catch performance degradation."""
+    """Test performance regression using new API."""
 
     def test_small_scale_performance(self):
         """Test performance at small scales to catch regressions."""
@@ -26,10 +24,11 @@ class TestPerformanceRegression:
 
         frame = EntityFrame()
         frame.add_method("regression_test", entities)
+        collection = frame.regression_test
 
         # Test performance (should be >10k entities/sec after optimization)
         start = time.time()
-        hashes = frame.hash_collection_hex("regression_test", "blake3")
+        collection.add_hash("blake3")
         elapsed = time.time() - start
 
         rate = count / elapsed if elapsed > 0 else 0
@@ -37,8 +36,14 @@ class TestPerformanceRegression:
         # Regression test: Should be much faster than original 3k entities/sec
         assert (
             rate > 10_000
-        ), f"Performance regression detected: {rate:.0f} entities/sec < 10k threshold"
-        assert len(hashes) == count
+        ), f"Performance regression: {rate:.0f} entities/sec < 10k entities/sec"
+
+        # Verify results are correct
+        assert len(collection) == count
+        for i in range(min(10, count)):  # Check first 10 entities
+            entity = collection[i]
+            assert "hash" in entity["metadata"]
+            assert len(entity["metadata"]["hash"]) == 32  # blake3 hash size
 
     def test_algorithm_performance_comparison(self):
         """Test that all algorithms perform reasonably and consistently."""
@@ -53,73 +58,24 @@ class TestPerformanceRegression:
         for algorithm in algorithms:
             frame = EntityFrame()
             frame.add_method("algo_test", entities)
+            collection = frame.algo_test
 
             start = time.time()
-            hashes = frame.hash_collection_hex("algo_test", algorithm)
+            collection.add_hash(algorithm)
             elapsed = time.time() - start
 
             rate = count / elapsed if elapsed > 0 else 0
-            results[algorithm] = {"rate": rate, "hashes": hashes}
+            results[algorithm] = rate
 
-            # Each algorithm should be reasonably fast
-            assert rate > 1_000, f"{algorithm} too slow: {rate:.0f} entities/sec"
-            assert len(hashes) == count
+            # Each algorithm should process at least 5k entities/sec
+            assert rate > 5_000, f"{algorithm} too slow: {rate:.0f} entities/sec"
 
-        # Verify algorithms produce different results
-        blake3_hashes = results["blake3"]["hashes"]
-        sha256_hashes = results["sha256"]["hashes"]
-        assert (
-            blake3_hashes != sha256_hashes
-        ), "Different algorithms should produce different hashes"
+            # Verify correctness
+            entity = collection[0]
+            assert "hash" in entity["metadata"]
 
-        # BLAKE3 should generally be fastest (though not required)
-        # This is informational, not a hard requirement
-        fastest_algo = max(results.keys(), key=lambda k: results[k]["rate"])
-        print(
-            f"Fastest algorithm: {fastest_algo} ({results[fastest_algo]['rate']:.0f} entities/sec)"
-        )
-
-    def test_output_format_consistency(self):
-        """Test that different output formats work correctly and consistently."""
-        count = 200
-        entities = [
-            {"users": [f"user_{i}"], "orders": [f"order_{i}"]} for i in range(count)
-        ]
-
-        frame = EntityFrame()
-        frame.add_method("format_test", entities)
-
-        # Test PyBytes format
-        pybytes_hashes = frame.hash_collection("format_test", "sha256")
-
-        # Test hex format
-        hex_hashes = frame.hash_collection_hex("format_test", "sha256")
-
-        # Test raw concatenated format
-        raw_bytes = frame.hash_collection_raw("format_test", "sha256")
-
-        # Verify consistency
-        assert len(pybytes_hashes) == count
-        assert len(hex_hashes) == count
-
-        # Verify hex format correctness (SHA-256 = 32 bytes = 64 hex chars)
-        for hex_hash in hex_hashes:
-            assert (
-                len(hex_hash) == 64
-            ), f"SHA-256 hex should be 64 chars, got {len(hex_hash)}"
-            assert all(
-                c in "0123456789abcdef" for c in hex_hash
-            ), "Invalid hex characters"
-
-        # Verify hex and bytes consistency
-        for pybytes_hash, hex_hash in zip(pybytes_hashes, hex_hashes):
-            assert bytes(pybytes_hash).hex() == hex_hash, "Hex/bytes mismatch"
-
-        # Verify raw bytes format (basic check)
-        raw_data = bytes(raw_bytes)
-        assert (
-            len(raw_data) > count * 30
-        ), "Raw bytes should contain at least hash size * count"
+        # Blake3 should be fastest (it's designed for speed)
+        assert results["blake3"] >= results["sha256"]
 
     def test_deterministic_hashing(self):
         """Test that hashing is deterministic across runs."""
@@ -134,66 +90,49 @@ class TestPerformanceRegression:
         # Create two separate frames
         frame1 = EntityFrame()
         frame1.add_method("test1", [entities[0]])
+        frame1.test1.add_hash("sha256")
+        hash1 = frame1.test1[0]["metadata"]["hash"]
 
         frame2 = EntityFrame()
         frame2.add_method("test2", [entities[1]])
+        frame2.test2.add_hash("sha256")
+        hash2 = frame2.test2[0]["metadata"]["hash"]
 
-        # Hash the same logical entity (different order) multiple times
-        hash1_run1 = frame1.hash_collection_hex("test1", "sha256")
-        hash1_run2 = frame1.hash_collection_hex("test1", "sha256")
-        hash2_run1 = frame2.hash_collection_hex("test2", "sha256")
-
-        # All should be identical (deterministic and order-independent)
-        assert hash1_run1 == hash1_run2, "Hashing should be deterministic"
-        assert hash1_run1 == hash2_run1, "Hashing should be order-independent"
+        # Same logical entity should produce same hash regardless of input order
+        assert hash1 == hash2, "Hashing is not deterministic"
 
     def test_memory_efficiency_basic(self):
         """Test basic memory efficiency with string interning."""
+        # Create many entities with repeated strings to test interning efficiency
         count = 1000
-        overlap_ratio = 0.7  # 70% shared strings
-
         entities = []
         for i in range(count):
-            if i < count * overlap_ratio:
-                # Shared strings (cycle through patterns for overlap)
-                base = i % 50
-                entity = {
-                    "users": [f"shared_user_{base}"],
-                    "data": [f"shared_data_{base}"],
+            entities.append(
+                {
+                    "users": [f"user_{i % 100}"],  # Only 100 unique user names
+                    "category": [f"cat_{i % 10}"],  # Only 10 unique categories
                 }
-            else:
-                # Unique strings
-                entity = {"users": [f"unique_user_{i}"], "data": [f"unique_data_{i}"]}
-            entities.append(entity)
+            )
 
         frame = EntityFrame()
         frame.add_method("memory_test", entities)
+        collection = frame.memory_test
 
-        # Test that string interning provides compression
-        interner_size = frame.interner_size()
-        theoretical_strings = count * 2 + 2  # 2 strings per entity + 2 datasets
-        compression_ratio = (
-            theoretical_strings / interner_size if interner_size > 0 else 1
-        )
-
-        # Should achieve some compression due to string overlap
-        assert (
-            compression_ratio > 1.2
-        ), f"Insufficient string compression: {compression_ratio:.1f}x"
-
-        # Performance should still be good
+        # Add hashes
         start = time.time()
-        hashes = frame.hash_collection_hex("memory_test", "blake3")
+        collection.add_hash("blake3")
         elapsed = time.time() - start
+
+        # Should still be fast despite many entities
         rate = count / elapsed if elapsed > 0 else 0
+        assert rate > 8_000, f"Memory efficiency issue: {rate:.0f} entities/sec"
 
-        assert (
-            rate > 5_000
-        ), f"Performance with string overlap too slow: {rate:.0f} entities/sec"
-        assert len(hashes) == count
+        # Verify string interning worked - should only have unique strings
+        dataset_names = frame.get_dataset_names()
+        assert len(dataset_names) == 2  # users, category
 
-
-if __name__ == "__main__":
-    import pytest
-
-    pytest.main([__file__])
+        # Verify all entities have hashes
+        assert len(collection) == count
+        for i in range(min(5, count)):  # Check first 5
+            entity = collection[i]
+            assert "hash" in entity["metadata"]

@@ -174,3 +174,86 @@ def test_invalid_hash_algorithm():
         frame.hash_entity("test", 0, "invalid_algorithm")
 
     assert "Unsupported hash algorithm" in str(exc_info.value)
+
+
+def test_preexisting_metadata_support():
+    """Test that entities can be created with pre-existing metadata."""
+    frame = EntityFrame()
+
+    # Test entities with pre-existing metadata
+    entities_with_metadata = [
+        {
+            "customers": ["c1", "c2"],
+            "orders": ["o1"],
+            "metadata": {
+                "hash": b"test_hash_bytes_entity_1",
+                "source": b"system_a",
+                "confidence": b"0.85",
+            },
+        },
+        {
+            "customers": ["c3"],
+            "orders": ["o2", "o3"],
+            "metadata": {
+                "hash": b"test_hash_bytes_entity_2",
+                "custom_data": b"some_bytes_data",
+            },
+        },
+    ]
+
+    # Add entities with metadata
+    frame.add_method("test_metadata", entities_with_metadata)
+
+    # Test collection access
+    collection = frame.test_metadata
+    assert len(collection) == 2
+
+    # Test entity access with metadata
+    entity_0 = collection[0]
+    assert "metadata" in entity_0
+    assert entity_0["metadata"]["hash"] == b"test_hash_bytes_entity_1"
+    assert entity_0["metadata"]["source"] == b"system_a"
+    assert entity_0["metadata"]["confidence"] == b"0.85"
+
+    entity_1 = collection[1]
+    assert "metadata" in entity_1
+    assert entity_1["metadata"]["hash"] == b"test_hash_bytes_entity_2"
+    assert entity_1["metadata"]["custom_data"] == b"some_bytes_data"
+    # entity_1 shouldn't have source or confidence keys
+    assert "source" not in entity_1["metadata"]
+    assert "confidence" not in entity_1["metadata"]
+
+
+def test_mixed_metadata_and_hashing():
+    """Test combining pre-existing metadata with new hash generation."""
+    frame = EntityFrame()
+
+    # One entity with pre-existing metadata, one without
+    entities = [
+        {"customers": ["c1", "c2"], "metadata": {"existing_hash": b"old_hash_value"}},
+        {
+            "customers": ["c3", "c4"]
+            # No metadata
+        },
+    ]
+
+    frame.add_method("mixed_test", entities)
+    collection = frame.mixed_test
+
+    # Add new hashes to the collection
+    collection.add_hash("blake3")
+
+    # First entity should have both existing metadata and new hash
+    entity_0 = collection[0]
+    assert entity_0["metadata"]["existing_hash"] == b"old_hash_value"
+    assert "hash" in entity_0["metadata"]  # New hash added
+    assert len(entity_0["metadata"]["hash"]) == 32  # blake3 hash size
+
+    # Second entity should only have the new hash
+    entity_1 = collection[1]
+    assert "existing_hash" not in entity_1["metadata"]
+    assert "hash" in entity_1["metadata"]
+    assert len(entity_1["metadata"]["hash"]) == 32
+
+    # Verify hashes
+    assert collection.verify_hashes("blake3") is True

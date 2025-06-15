@@ -307,8 +307,11 @@ class TestEntityFrame:
     def test_multiple_methods_with_diverse_datasets(self):
         """Test multiple methods with different dataset combinations."""
 
-        # Create frame with pre-declared datasets
-        frame = EntityFrame.with_datasets(["customers", "orders", "products"])
+        # Create frame and pre-declare datasets for efficiency
+        frame = EntityFrame()
+        frame.declare_dataset("customers")
+        frame.declare_dataset("orders")
+        frame.declare_dataset("products")
 
         # Add first method
         frame.add_method(

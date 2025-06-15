@@ -118,6 +118,60 @@ impl EntityCollection {
             Ok(comparisons)
         })
     }
+
+    /// Add hashes to all entities in this collection using optimized batch processing
+    pub fn add_hash(
+        &mut self,
+        interner: &mut crate::interner::StringInterner,
+        algorithm: &str,
+    ) -> PyResult<()> {
+        // Use our optimized batch hashing method
+        let hashes = self.hash_all_entities(interner, algorithm)?;
+
+        // Intern the hash key once for efficiency
+        let hash_key = interner.intern("hash");
+
+        // Add hash to each entity's metadata
+        for (entity, hash) in self.entities.iter_mut().zip(hashes) {
+            entity.set_metadata(hash_key, hash);
+        }
+
+        Ok(())
+    }
+
+    /// Verify hashes for all entities in this collection
+    pub fn verify_hashes(
+        &self,
+        interner: &mut crate::interner::StringInterner,
+        algorithm: &str,
+    ) -> PyResult<bool> {
+        // Intern the hash key for lookup
+        let hash_key = interner.intern("hash");
+
+        // Check if any entity has a hash to verify
+        let has_hashes = self
+            .entities
+            .iter()
+            .any(|entity| entity.has_metadata(hash_key));
+
+        if !has_hashes {
+            return Ok(true); // No hashes to verify - consider this success
+        }
+
+        // Compute current hashes
+        let current_hashes = self.hash_all_entities(interner, algorithm)?;
+
+        // Compare with stored hashes
+        for (entity, current_hash) in self.entities.iter().zip(current_hashes) {
+            if let Some(stored_hash) = entity.get_metadata_by_id(hash_key) {
+                if stored_hash != current_hash {
+                    return Ok(false); // Hash mismatch found
+                }
+            }
+        }
+
+        Ok(true) // All hashes verified successfully
+    }
 }
 
 impl EntityCollection {
@@ -328,46 +382,6 @@ impl EntityCollection {
         }
 
         Ok(hasher.finalize().to_vec())
-    }
-
-    /// Batch hash all entities returning hex strings for convenience
-    pub fn hash_all_entities_hex(
-        &self,
-        interner: &mut crate::interner::StringInterner,
-        algorithm: &str,
-    ) -> PyResult<Vec<String>> {
-        let hashes = self.hash_all_entities(interner, algorithm)?;
-        Ok(hashes.into_iter().map(hex::encode).collect())
-    }
-
-    /// Batch hash all entities returning single concatenated byte buffer
-    /// This avoids creating individual PyBytes objects and should be much faster
-    /// Format: [hash1_length][hash1_bytes][hash2_length][hash2_bytes]...
-    pub fn hash_all_entities_concatenated(
-        &self,
-        interner: &mut crate::interner::StringInterner,
-        algorithm: &str,
-    ) -> PyResult<Vec<u8>> {
-        let hashes = self.hash_all_entities(interner, algorithm)?;
-
-        // Pre-calculate total size needed
-        let hash_size = if hashes.is_empty() {
-            0
-        } else {
-            hashes[0].len()
-        };
-        let total_size = hashes.len() * (4 + hash_size); // 4 bytes for length + hash bytes
-
-        let mut result = Vec::with_capacity(total_size);
-
-        for hash in hashes {
-            // Write hash length as 4-byte little-endian
-            result.extend_from_slice(&(hash.len() as u32).to_le_bytes());
-            // Write hash bytes
-            result.extend_from_slice(&hash);
-        }
-
-        Ok(result)
     }
 }
 
@@ -583,15 +597,15 @@ mod tests {
             assert_eq!(hash.len(), 32);
         }
 
-        // Test hex batch hashing
-        let hex_hashes = collection
-            .hash_all_entities_hex(&mut interner, "blake3")
+        // Test blake3 batch hashing
+        let blake_hashes = collection
+            .hash_all_entities(&mut interner, "blake3")
             .unwrap();
-        assert_eq!(hex_hashes.len(), 2);
+        assert_eq!(blake_hashes.len(), 2);
 
-        // Verify hex strings (32 bytes = 64 hex chars)
-        for hex_hash in &hex_hashes {
-            assert_eq!(hex_hash.len(), 64);
+        // Verify blake3 hash sizes (32 bytes)
+        for hash in &blake_hashes {
+            assert_eq!(hash.len(), 32);
         }
 
         // Test consistency - same algorithm should produce same results

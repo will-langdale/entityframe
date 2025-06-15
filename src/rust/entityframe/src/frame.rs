@@ -81,19 +81,65 @@ impl EntityFrame {
     }
 
     /// Create and add a collection with entity data in one step
-    pub fn add_method(
-        &mut self,
-        method_name: &str,
-        entity_data: Vec<HashMap<String, Vec<String>>>,
-    ) {
+    pub fn add_method(&mut self, method_name: &str, entity_data: Vec<PyObject>) -> PyResult<()> {
         // Create a collection and add entities using frame's shared interner
         let mut collection = self.create_collection(method_name);
+
+        // Parse entity data with optional metadata support
+        let mut processed_entities = Vec::new();
+        let mut metadata_list = Vec::new();
+
+        Python::with_gil(|py| -> PyResult<()> {
+            for entity_obj in entity_data {
+                let entity_dict = entity_obj.downcast_bound::<pyo3::types::PyDict>(py)?;
+
+                let mut datasets = HashMap::new();
+                let mut metadata = HashMap::new();
+
+                // Parse datasets and metadata
+                for (key, value) in entity_dict.iter() {
+                    let key_str: String = key.extract()?;
+
+                    if key_str == "metadata" {
+                        // Handle metadata dictionary
+                        let metadata_dict = value.downcast::<pyo3::types::PyDict>()?;
+                        for (meta_key, meta_value) in metadata_dict.iter() {
+                            let meta_key_str: String = meta_key.extract()?;
+                            let meta_value_bytes: Vec<u8> = meta_value.extract()?;
+                            let meta_key_id = self.interner.intern(&meta_key_str);
+                            metadata.insert(meta_key_id, meta_value_bytes);
+                        }
+                    } else {
+                        // Handle dataset records
+                        let records: Vec<String> = value.extract()?;
+                        datasets.insert(key_str, records);
+                    }
+                }
+
+                processed_entities.push(datasets);
+                metadata_list.push(metadata);
+            }
+            Ok(())
+        })?;
+
+        // Add entities to collection
         collection.add_entities(
-            entity_data,
+            processed_entities,
             &mut self.interner,
             &mut self.dataset_name_to_id,
         );
+
+        // Apply pre-existing metadata to entities
+        for (entity_index, metadata) in metadata_list.into_iter().enumerate() {
+            if !metadata.is_empty() {
+                for (key_id, value) in metadata {
+                    collection.entities[entity_index].set_metadata(key_id, value);
+                }
+            }
+        }
+
         self.collections.insert(method_name.to_string(), collection);
+        Ok(())
     }
 
     /// Get collection names in this frame
@@ -280,47 +326,6 @@ impl EntityFrame {
         })
     }
 
-    /// Batch hash all entities in a collection returning hex strings
-    #[pyo3(signature = (collection_name, algorithm = "sha256"))]
-    pub fn hash_collection_hex(
-        &mut self,
-        collection_name: &str,
-        algorithm: &str,
-    ) -> PyResult<Vec<String>> {
-        let collection = self.collections.get(collection_name).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                "Collection '{}' not found",
-                collection_name
-            ))
-        })?;
-
-        // Use collection's batch hashing method
-        collection.hash_all_entities_hex(&mut self.interner, algorithm)
-    }
-
-    /// Batch hash all entities in a collection returning concatenated bytes
-    /// This is much faster than individual PyBytes objects
-    #[pyo3(signature = (collection_name, algorithm = "sha256"))]
-    pub fn hash_collection_raw(
-        &mut self,
-        collection_name: &str,
-        algorithm: &str,
-    ) -> PyResult<Py<PyBytes>> {
-        let collection = self.collections.get(collection_name).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                "Collection '{}' not found",
-                collection_name
-            ))
-        })?;
-
-        // Use collection's concatenated hashing method
-        let concatenated_bytes =
-            collection.hash_all_entities_concatenated(&mut self.interner, algorithm)?;
-
-        // Return as single PyBytes object
-        Python::with_gil(|py| Ok(PyBytes::new(py, &concatenated_bytes).into()))
-    }
-
     /// Batch hash all entities across all collections
     #[pyo3(signature = (algorithm = "sha256"))]
     pub fn hash_all_entities(
@@ -343,6 +348,34 @@ impl EntityFrame {
         }
 
         Ok(result)
+    }
+
+    /// Add hashes to all entities in a collection by name
+    pub fn add_collection_hash(&mut self, collection_name: &str, algorithm: &str) -> PyResult<()> {
+        let collection = self.collections.get_mut(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        collection.add_hash(&mut self.interner, algorithm)
+    }
+
+    /// Verify hashes for all entities in a collection by name
+    pub fn verify_collection_hashes(
+        &mut self,
+        collection_name: &str,
+        algorithm: &str,
+    ) -> PyResult<bool> {
+        let collection = self.collections.get(collection_name).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Collection '{}' not found",
+                collection_name
+            ))
+        })?;
+
+        collection.verify_hashes(&mut self.interner, algorithm)
     }
 }
 
@@ -402,35 +435,46 @@ mod tests {
     }
 
     #[test]
-    fn test_add_method_collections_different_record_ids() {
+    fn test_collections_different_record_ids() {
         use std::collections::HashMap;
 
         let mut frame = EntityFrame::new();
 
-        // Add two methods with different records using the simplified API
-        frame.add_method(
-            "coll1",
-            vec![{
-                let mut data = HashMap::new();
-                data.insert(
-                    "customers".to_string(),
-                    vec!["rec1".to_string(), "rec2".to_string()],
-                );
-                data
-            }],
+        // Test collections with different records using direct collection methods
+        let mut collection1 = frame.create_collection("coll1");
+        let mut collection2 = frame.create_collection("coll2");
+
+        let entity_data1 = vec![{
+            let mut data = HashMap::new();
+            data.insert(
+                "customers".to_string(),
+                vec!["rec1".to_string(), "rec2".to_string()],
+            );
+            data
+        }];
+
+        let entity_data2 = vec![{
+            let mut data = HashMap::new();
+            data.insert(
+                "customers".to_string(),
+                vec!["rec3".to_string(), "rec4".to_string()],
+            );
+            data
+        }];
+
+        collection1.add_entities(
+            entity_data1,
+            &mut frame.interner,
+            &mut frame.dataset_name_to_id,
+        );
+        collection2.add_entities(
+            entity_data2,
+            &mut frame.interner,
+            &mut frame.dataset_name_to_id,
         );
 
-        frame.add_method(
-            "coll2",
-            vec![{
-                let mut data = HashMap::new();
-                data.insert(
-                    "customers".to_string(),
-                    vec!["rec3".to_string(), "rec4".to_string()],
-                );
-                data
-            }],
-        );
+        frame.add_collection("coll1", collection1);
+        frame.add_collection("coll2", collection2);
 
         // Get entities and check they have different record IDs
         let c1 = frame.get_collection("coll1").unwrap();
@@ -442,23 +486,21 @@ mod tests {
         let e1_records = e1.get_records_by_id(0);
         let e2_records = e2.get_records_by_id(0);
 
-        println!("Entity 1 records: {:?}", e1_records);
-        println!("Entity 2 records: {:?}", e2_records);
-
         // They should have different record IDs since they're different strings
         assert_ne!(e1_records, e2_records);
 
         // Jaccard should be 0.0 since no record overlap
         let jaccard = e1.jaccard_similarity(&e2);
-        println!("Jaccard: {}", jaccard);
         assert_eq!(jaccard, 0.0);
     }
 
     #[test]
-    fn test_simplified_hash_functionality() {
+    fn test_collection_hash_functionality() {
         let mut frame = EntityFrame::new();
 
-        // Create test data
+        // Test collection creation and hashing directly
+        let mut collection = frame.create_collection("test");
+
         let entity_data = vec![
             {
                 let mut data = HashMap::new();
@@ -480,7 +522,12 @@ mod tests {
             },
         ];
 
-        frame.add_method("test", entity_data);
+        collection.add_entities(
+            entity_data,
+            &mut frame.interner,
+            &mut frame.dataset_name_to_id,
+        );
+        frame.add_collection("test", collection);
 
         // Test that all entities have sorted records (since we use optimised batch processing)
         let collection = frame.get_collection("test").unwrap();
@@ -489,8 +536,7 @@ mod tests {
         assert!(entity1.has_sorted_records());
         assert!(entity2.has_sorted_records());
 
-        // Test that entity hashing works (basic functionality test)
-        // We'll test hash consistency and differences at the Python test level
+        // Test collection-level functionality
         assert_eq!(frame.collection_count(), 1);
         assert_eq!(frame.total_entities(), 2);
     }
@@ -499,7 +545,9 @@ mod tests {
     fn test_batch_hashing_performance() {
         let mut frame = EntityFrame::new();
 
-        // Create test data with multiple entities
+        // Test batch hashing using collection methods directly
+        let mut collection = frame.create_collection("test_batch");
+
         let entity_data = vec![
             {
                 let mut data = HashMap::new();
@@ -529,7 +577,12 @@ mod tests {
             },
         ];
 
-        frame.add_method("test_batch", entity_data);
+        collection.add_entities(
+            entity_data,
+            &mut frame.interner,
+            &mut frame.dataset_name_to_id,
+        );
+        frame.add_collection("test_batch", collection);
 
         // Test batch hashing vs individual hashing for consistency
         let individual_hashes: Result<Vec<_>, _> = (0..3)
@@ -545,15 +598,6 @@ mod tests {
         // Note: We can't directly compare Py<PyBytes> in Rust tests easily,
         // but we can verify the batch operation succeeded and returned the right count
         assert_eq!(batch_hashes.len(), 3);
-
-        // Test hex batch hashing
-        let hex_hashes = frame.hash_collection_hex("test_batch", "sha256").unwrap();
-        assert_eq!(hex_hashes.len(), 3);
-
-        // Verify hex strings are proper length for SHA-256 (64 hex chars = 32 bytes)
-        for hex_hash in &hex_hashes {
-            assert_eq!(hex_hash.len(), 64);
-        }
 
         // Test all entities across all collections
         let all_hashes = frame.hash_all_entities("blake3").unwrap();
