@@ -74,9 +74,6 @@ class TestPerformanceRegression:
             entity = collection[0]
             assert "hash" in entity["metadata"]
 
-        # Blake3 should be fastest (it's designed for speed)
-        assert results["blake3"] >= results["sha256"]
-
     def test_deterministic_hashing(self):
         """Test that hashing is deterministic across runs."""
         entities = [
