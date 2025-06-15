@@ -3,7 +3,6 @@ use digest::{Digest, DynDigest};
 use pyo3::prelude::*;
 use sha2::{Sha256, Sha512};
 use sha3::{Sha3_256, Sha3_512};
-use std::collections::HashMap;
 
 /// BLAKE3 wrapper to implement DynDigest trait for unified API
 struct Blake3Wrapper {
@@ -102,53 +101,6 @@ pub fn create_hasher(algorithm: &str) -> PyResult<Box<dyn DynDigest>> {
     }
 }
 
-/// Hash entity data using pre-fetched string cache for optimal performance
-pub fn hash_entity_with_cache(
-    datasets: &HashMap<u32, roaring::RoaringBitmap>,
-    sorted_records: &HashMap<u32, Vec<u32>>,
-    sorted_dataset_ids: &[u32],
-    string_cache: &HashMap<u32, &str>,
-    algorithm: &str,
-) -> PyResult<Vec<u8>> {
-    let mut hasher = create_hasher(algorithm)?;
-
-    // Process datasets in sorted order
-    for &dataset_id in sorted_dataset_ids {
-        if let Some(bitmap) = datasets.get(&dataset_id) {
-            // Get dataset string from cache
-            if let Some(&dataset_str) = string_cache.get(&dataset_id) {
-                hasher.update(dataset_str.as_bytes());
-
-                // Use pre-computed sorted record order
-                if let Some(sorted_record_ids) = sorted_records.get(&dataset_id) {
-                    // Hash each record string from cache
-                    for &record_id in sorted_record_ids {
-                        if let Some(&record_str) = string_cache.get(&record_id) {
-                            hasher.update(record_str.as_bytes());
-                        }
-                    }
-                } else {
-                    // Fallback: sort records at runtime if pre-computed order missing
-                    let mut record_ids: Vec<u32> = bitmap.iter().collect();
-                    record_ids.sort_by(|&a, &b| {
-                        let str_a = string_cache.get(&a).unwrap_or(&"");
-                        let str_b = string_cache.get(&b).unwrap_or(&"");
-                        str_a.cmp(str_b)
-                    });
-
-                    for record_id in record_ids {
-                        if let Some(&record_str) = string_cache.get(&record_id) {
-                            hasher.update(record_str.as_bytes());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(hasher.finalize().to_vec())
-}
-
 /// Collect all unique string IDs needed for a batch of entities
 pub fn collect_string_ids(
     entities: &[&crate::entity::Entity],
@@ -185,8 +137,6 @@ pub fn collect_string_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interner::StringInterner;
-    use roaring::RoaringBitmap;
 
     #[test]
     fn test_unified_hash_algorithms() {
@@ -242,54 +192,6 @@ mod tests {
 
             assert_eq!(hash1, hash2, "Algorithm {} not deterministic", algorithm);
         }
-    }
-
-    #[test]
-    fn test_hash_entity_with_cache() {
-        let mut interner = StringInterner::new();
-
-        // Create test data
-        let dataset_id = interner.intern("customers");
-        let record1_id = interner.intern("customer_a");
-        let record2_id = interner.intern("customer_b");
-
-        let mut datasets = HashMap::new();
-        let mut bitmap = RoaringBitmap::new();
-        bitmap.insert(record1_id);
-        bitmap.insert(record2_id);
-        datasets.insert(dataset_id, bitmap);
-
-        let mut sorted_records = HashMap::new();
-        sorted_records.insert(dataset_id, vec![record1_id, record2_id]);
-
-        let sorted_dataset_ids = vec![dataset_id];
-
-        // Create string cache
-        let string_cache = interner.bulk_get_strings(&[dataset_id, record1_id, record2_id]);
-
-        // Test hashing
-        let hash = hash_entity_with_cache(
-            &datasets,
-            &sorted_records,
-            &sorted_dataset_ids,
-            &string_cache,
-            "sha256",
-        )
-        .unwrap();
-
-        assert_eq!(hash.len(), 32); // SHA-256 output size
-
-        // Test consistency
-        let hash2 = hash_entity_with_cache(
-            &datasets,
-            &sorted_records,
-            &sorted_dataset_ids,
-            &string_cache,
-            "sha256",
-        )
-        .unwrap();
-
-        assert_eq!(hash, hash2);
     }
 
     #[test]

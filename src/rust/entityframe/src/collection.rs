@@ -179,34 +179,87 @@ impl EntityCollection {
         interner: &mut crate::interner::StringInterner,
         algorithm: &str,
     ) -> PyResult<Vec<Vec<u8>>> {
+        use rayon::prelude::*;
+
         if self.entities.is_empty() {
             return Ok(Vec::new());
         }
 
+        const CHUNK_SIZE: usize = 10_000; // Smaller chunks for better parallelization
+
         // Get sorted dataset IDs from interner
         let sorted_dataset_ids = interner.get_sorted_ids().to_vec();
 
-        // Collect all string IDs needed for ALL entities (bulk optimisation)
-        let entity_refs: Vec<_> = self.entities.iter().collect();
-        let string_ids = crate::hash::collect_string_ids(&entity_refs, &sorted_dataset_ids);
+        // Process in chunks for memory efficiency and parallelization
+        let mut all_results = Vec::with_capacity(self.entities.len());
 
-        // Single bulk string lookup for ALL entities
-        let string_cache = interner.bulk_get_strings(&string_ids);
+        for chunk in self.entities.chunks(CHUNK_SIZE) {
+            // Collect all string IDs needed for this chunk
+            let entity_refs: Vec<_> = chunk.iter().collect();
+            let string_ids = crate::hash::collect_string_ids(&entity_refs, &sorted_dataset_ids);
 
-        // Process each entity using cached strings
-        let mut results = Vec::with_capacity(self.entities.len());
-        for entity in &self.entities {
-            let hash = crate::hash::hash_entity_with_cache(
-                entity.get_datasets_map(),
-                entity.get_sorted_records_map(),
-                &sorted_dataset_ids,
-                &string_cache,
-                algorithm,
-            )?;
-            results.push(hash);
+            // Single bulk string lookup for the chunk
+            let string_cache = interner.bulk_get_strings(&string_ids);
+
+            // Build massive buffer for entire chunk
+            // Pre-calculate total size for better allocation
+            let estimated_size = chunk.len() * 1024 + string_cache.len() * 20;
+            let mut chunk_buffer = String::with_capacity(estimated_size);
+            let mut entity_ranges = Vec::with_capacity(chunk.len());
+
+            // Build buffer with all entity strings
+            for entity in chunk {
+                let start = chunk_buffer.len();
+
+                // Get entity's datasets map once
+                let datasets_map = entity.get_datasets_map();
+                let sorted_records_map = entity.get_sorted_records_map();
+
+                // Process datasets in sorted order
+                for &dataset_id in &sorted_dataset_ids {
+                    if datasets_map.contains_key(&dataset_id) {
+                        // Add dataset string (no Option check - we know it exists)
+                        chunk_buffer.push_str(string_cache[&dataset_id]);
+                        chunk_buffer.push('|');
+
+                        // Add sorted records
+                        if let Some(sorted_record_ids) = sorted_records_map.get(&dataset_id) {
+                            for &record_id in sorted_record_ids {
+                                // Direct lookup - skip Option check since we pre-fetched all strings
+                                if let Some(&record_str) = string_cache.get(&record_id) {
+                                    chunk_buffer.push_str(record_str);
+                                    chunk_buffer.push('|');
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let end = chunk_buffer.len();
+                entity_ranges.push((start, end));
+            }
+
+            // Convert buffer to bytes once for all parallel operations
+            let buffer_bytes = chunk_buffer.into_bytes();
+
+            // Clone algorithm string for parallel use (avoids borrow issues)
+            let algo = algorithm.to_string();
+
+            // Parallel hash buffer slices
+            let chunk_hashes: Vec<Vec<u8>> = entity_ranges
+                .par_iter()
+                .map(|(start, end)| {
+                    let mut hasher =
+                        crate::hash::create_hasher(&algo).expect("Failed to create hasher");
+                    hasher.update(&buffer_bytes[*start..*end]);
+                    hasher.finalize().to_vec()
+                })
+                .collect();
+
+            all_results.extend(chunk_hashes);
         }
 
-        Ok(results)
+        Ok(all_results)
     }
 
     /// Batch hash all entities returning hex strings for convenience

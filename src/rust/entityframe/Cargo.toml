@@ -16,6 +16,7 @@ sha2 = "0.10"
 sha3 = "0.10"
 blake3 = "1.5"
 hex = "0.4"
+rayon = "1.10"
 
 [features]
 extension-module = ["pyo3/extension-module"]
