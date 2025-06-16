@@ -50,6 +50,11 @@ disallow_untyped_defs = true
 module = "entityframe.entityframe"
 ignore_missing_imports = true
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
 [tool.uv]
 # Prevent uv sync from building the package - use just build instead
 package = false

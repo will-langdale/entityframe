@@ -4,6 +4,7 @@ Tests that performance scales appropriately with data size.
 """
 
 import time
+import pytest
 from entityframe import EntityFrame
 
 
@@ -146,6 +147,7 @@ class TestScalingBenchmarks:
         # Verify all have hashes
         assert len(collection) == count
 
+    @pytest.mark.slow
     def test_million_scale_performance(self):
         """Test performance at 1M scale to validate production readiness."""
         count = 1_000_000
@@ -200,6 +202,7 @@ class TestScalingBenchmarks:
         print(f"  Performance: {rate:,.0f} entities/sec")
         print(f"  Memory efficiency: {len(dataset_names)} unique datasets")
 
+    @pytest.mark.slow
     def test_comparison_scaling_performance(self):
         """Test entity comparison performance at larger scales."""
         count = 10_000  # Comparison is O(n) so test at reasonable scale
