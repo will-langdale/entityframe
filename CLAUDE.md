@@ -53,23 +53,28 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 - `just build`: Build the Rust extension module
 - `just test`: Run quick tests (Python + Rust, excluding slow tests)
 - `just test scale`: Run all tests including scale tests (Python + Rust)
-- `just test-slow`: Run only slow/scale tests
-- `just test-python`: Run Python tests only (excluding slow tests)
-- `just test-rust`: Run Rust tests only
+- `just test python`: Run Python tests only (excluding slow tests)
+- `just test rust`: Run Rust tests only
 - `just format`: Format and lint all code (Python + Rust)
 - `just clean`: Remove all build artifacts
 
 ## Testing strategy
 
-The project has two categories of tests:
+### Test commands
+- `just test`: Quick tests (Python + Rust, excluding slow tests) - use for development
+- `just test scale`: All tests including scale tests - use before releases  
+- `just test python`: Python tests only (excluding slow tests) - use for Python development
+- `just test rust`: Rust tests only - use for Rust development
 
-### Quick tests (`just test`)
+### Test categories
+
+**Quick tests** (default):
 - Functional tests that verify correctness
 - Performance regression tests at smaller scales (1k-5k entities)
 - Complete in under 10 seconds
 - Run automatically in CI/development workflow
 
-### Scale tests (`just test scale` or `just test-slow`)
+**Scale tests** (`just test scale`):
 - Million-scale performance validation tests (`test_million_scale_performance`)
 - Large-scale comparison benchmarks (`test_comparison_scaling_performance`)  
 - Take several minutes to complete
