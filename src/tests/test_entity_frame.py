@@ -3,7 +3,7 @@ Tests for EntityFrame functionality (multi-collection container).
 """
 
 import pytest
-from entityframe import StringInterner, EntityCollection, EntityFrame
+from entityframe import StringInterner, CollectionCore, EntityFrame
 
 
 class TestEntityFrame:
@@ -21,7 +21,7 @@ class TestEntityFrame:
     def test_add_collection_manually(self):
         """Test manually creating and adding an empty collection to the frame."""
         frame = EntityFrame()
-        collection = EntityCollection("splink")
+        collection = CollectionCore("splink")
 
         frame.add_collection("splink", collection)
 
@@ -178,9 +178,9 @@ class TestEntityFrame:
         assert frame.interner_size() == 2  # "customers" + "cust_001"
 
     def test_frame_with_empty_collections(self):
-        """Test frame behavior with empty collections."""
+        """Test frame behaviour with empty collections."""
         frame = EntityFrame()
-        empty_collection = EntityCollection("empty_process")
+        empty_collection = CollectionCore("empty_process")
 
         frame.add_collection("empty", empty_collection)
 
@@ -307,8 +307,11 @@ class TestEntityFrame:
     def test_multiple_methods_with_diverse_datasets(self):
         """Test multiple methods with different dataset combinations."""
 
-        # Create frame with pre-declared datasets
-        frame = EntityFrame.with_datasets(["customers", "orders", "products"])
+        # Create frame and pre-declare datasets for efficiency
+        frame = EntityFrame()
+        frame.declare_dataset("customers")
+        frame.declare_dataset("orders")
+        frame.declare_dataset("products")
 
         # Add first method
         frame.add_method(

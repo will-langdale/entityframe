@@ -3,7 +3,7 @@ Tests for EntityCollection functionality (single process entity resolution).
 """
 
 import pytest
-from entityframe import EntityCollection, EntityFrame
+from entityframe import CollectionCore, EntityFrame
 
 
 class TestEntityCollection:
@@ -11,7 +11,7 @@ class TestEntityCollection:
 
     def test_collection_creation(self):
         """Test basic EntityCollection creation."""
-        collection = EntityCollection("splink")
+        collection = CollectionCore("splink")
 
         assert collection.process_name == "splink"
         assert collection.len() == 0
@@ -160,7 +160,7 @@ class TestEntityCollection:
 
     def test_empty_collection_operations(self):
         """Test operations on empty collections."""
-        collection = EntityCollection("empty_process")
+        collection = CollectionCore("empty_process")
 
         assert collection.len() == 0
         assert collection.is_empty()
@@ -172,7 +172,7 @@ class TestEntityCollection:
 
     def test_process_name_immutability(self):
         """Test that process name is set at creation and accessible."""
-        collection = EntityCollection("my_process")
+        collection = CollectionCore("my_process")
         assert collection.process_name == "my_process"
 
         # Process name should be read-only (getter property)

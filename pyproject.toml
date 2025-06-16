@@ -29,7 +29,7 @@ build-backend = "maturin"
 
 [tool.maturin]
 python-source = "src/python"
-module-name = "entityframe._rust"
+module-name = "entityframe.entityframe"
 manifest-path = "src/rust/entityframe/Cargo.toml"
 
 [dependency-groups]
@@ -47,8 +47,13 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = "entityframe._rust"
+module = "entityframe.entityframe"
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 
 [tool.uv]
 # Prevent uv sync from building the package - use just build instead

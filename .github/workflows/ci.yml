@@ -34,7 +34,7 @@ jobs:
       run: just build
     
     - name: Run Python tests
-      run: just test-python
+      run: uv run pytest
 
   test-os:
     name: test on ${{ matrix.os }}
