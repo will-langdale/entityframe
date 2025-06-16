@@ -3,21 +3,21 @@ use pyo3::types::PyBytes;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
-use crate::entity::Entity;
-use crate::interner::StringInterner;
+use crate::entity::EntityCore;
+use crate::interner::StringInternerCore;
 
-/// EntityCollection: A collection of entities from a single process (like pandas Series)
+/// CollectionCore: A collection of entities from a single process (like pandas Series)
 /// Collections should only be created through EntityFrame.create_collection() to ensure shared interner
 #[pyclass]
 #[derive(Clone)]
-pub struct EntityCollection {
-    pub entities: Vec<Entity>,
+pub struct CollectionCore {
+    pub entities: Vec<EntityCore>,
     process_name: String,
     // Simple design: collections don't own interners, they get them from the frame
 }
 
 #[pymethods]
-impl EntityCollection {
+impl CollectionCore {
     /// Create EntityCollection (internal constructor)
     /// Users should use EntityFrame.create_collection() instead
     #[new]
@@ -29,7 +29,7 @@ impl EntityCollection {
     }
 
     /// Get all entities in this collection
-    pub fn get_entities(&self) -> Vec<Entity> {
+    pub fn get_entities(&self) -> Vec<EntityCore> {
         self.entities.clone()
     }
 
@@ -58,17 +58,14 @@ impl EntityCollection {
     }
 
     /// Get an entity by index
-    pub fn get_entity(&self, index: usize) -> PyResult<Entity> {
+    pub fn get_entity(&self, index: usize) -> PyResult<EntityCore> {
         self.entities.get(index).cloned().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyIndexError, _>("Entity index out of range")
         })
     }
 
     /// Compare this collection with another collection entity-by-entity
-    pub fn compare_with(
-        &self,
-        other: &EntityCollection,
-    ) -> PyResult<Vec<HashMap<String, PyObject>>> {
+    pub fn compare_with(&self, other: &CollectionCore) -> PyResult<Vec<HashMap<String, PyObject>>> {
         if self.entities.len() != other.entities.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Collections must have the same number of entities to compare",
@@ -123,7 +120,7 @@ impl EntityCollection {
     /// Add hashes to all entities in this collection using optimized batch processing
     pub fn add_hash(
         &mut self,
-        interner: &mut crate::interner::StringInterner,
+        interner: &mut crate::interner::StringInternerCore,
         algorithm: &str,
     ) -> PyResult<()> {
         // Use our optimized batch hashing method
@@ -146,7 +143,7 @@ impl EntityCollection {
     /// Verify hashes for all entities in this collection
     pub fn verify_hashes(
         &self,
-        interner: &mut crate::interner::StringInterner,
+        interner: &mut crate::interner::StringInternerCore,
         algorithm: &str,
     ) -> PyResult<bool> {
         // Intern the hash key for lookup
@@ -185,14 +182,14 @@ impl EntityCollection {
     }
 }
 
-impl EntityCollection {
+impl CollectionCore {
     /// Add entities to this collection using shared interner from frame
     /// This is the main method used by EntityFrame.add_method()
     /// This is a regular Rust method, not exposed to Python
     pub fn add_entities(
         &mut self,
         entity_data: Vec<HashMap<String, Vec<String>>>,
-        interner: &mut StringInterner,
+        interner: &mut StringInternerCore,
         dataset_name_to_id: &mut HashMap<String, u32>,
     ) {
         use roaring::RoaringBitmap;
@@ -234,7 +231,7 @@ impl EntityCollection {
             }
 
             // Create entity with pre-computed sorted order
-            let entity = Entity::from_sorted_data(dataset_bitmaps, dataset_sorted_records);
+            let entity = EntityCore::from_sorted_data(dataset_bitmaps, dataset_sorted_records);
             self.entities.push(entity);
         }
     }
@@ -242,7 +239,7 @@ impl EntityCollection {
     /// Batch hash all entities in this collection for optimal performance
     pub fn hash_all_entities(
         &self,
-        interner: &mut crate::interner::StringInterner,
+        interner: &mut crate::interner::StringInternerCore,
         algorithm: &str,
     ) -> PyResult<Vec<Vec<u8>>> {
         if self.entities.is_empty() {
@@ -285,7 +282,7 @@ impl EntityCollection {
         &self,
         sorted_dataset_ids: &[u32],
         position_map: &HashMap<u32, usize>,
-        interner: &crate::interner::StringInterner,
+        interner: &crate::interner::StringInternerCore,
         algorithm: &str,
     ) -> PyResult<Vec<Vec<u8>>> {
         let mut hashes = Vec::with_capacity(self.entities.len());
@@ -309,7 +306,7 @@ impl EntityCollection {
         &self,
         sorted_dataset_ids: &[u32],
         position_map: &HashMap<u32, usize>,
-        interner: &crate::interner::StringInterner,
+        interner: &crate::interner::StringInternerCore,
         algorithm: &str,
         chunk_size: usize,
     ) -> PyResult<Vec<Vec<u8>>> {
@@ -346,10 +343,10 @@ impl EntityCollection {
     /// Optimized single entity hashing without profiling overhead
     fn hash_single_entity_optimized(
         &self,
-        entity: &Entity,
+        entity: &EntityCore,
         _sorted_dataset_ids: &[u32],
         position_map: &HashMap<u32, usize>,
-        interner: &crate::interner::StringInterner,
+        interner: &crate::interner::StringInternerCore,
         algorithm: &str,
     ) -> PyResult<Vec<u8>> {
         let mut hasher = crate::hash::create_hasher(algorithm)?;
@@ -402,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_collection_creation() {
-        let collection = EntityCollection::new("test_process");
+        let collection = CollectionCore::new("test_process");
         assert_eq!(collection.process_name(), "test_process");
         assert_eq!(collection.len(), 0);
         assert!(collection.is_empty());
@@ -411,8 +408,8 @@ mod tests {
 
     #[test]
     fn test_add_entities_with_shared_interner() {
-        let mut collection = EntityCollection::new("test");
-        let mut interner = StringInterner::new();
+        let mut collection = CollectionCore::new("test");
+        let mut interner = StringInternerCore::new();
         let mut dataset_name_to_id = HashMap::new();
 
         let entity_data = vec![
@@ -450,8 +447,8 @@ mod tests {
 
     #[test]
     fn test_batch_processing_with_sorted_records() {
-        let mut collection = EntityCollection::new("batch_test");
-        let mut interner = StringInterner::new();
+        let mut collection = CollectionCore::new("batch_test");
+        let mut interner = StringInternerCore::new();
         let mut dataset_name_to_id = HashMap::new();
 
         // Create test data with unsorted records to verify sorting works
@@ -529,8 +526,8 @@ mod tests {
 
     #[test]
     fn test_batch_processing_efficiency() {
-        let mut collection = EntityCollection::new("batch_test");
-        let mut interner = StringInterner::new();
+        let mut collection = CollectionCore::new("batch_test");
+        let mut interner = StringInternerCore::new();
         let mut dataset_name_to_id = HashMap::new();
 
         // Same test data for verification
@@ -569,8 +566,8 @@ mod tests {
 
     #[test]
     fn test_batch_hashing() {
-        let mut collection = EntityCollection::new("hash_test");
-        let mut interner = StringInterner::new();
+        let mut collection = CollectionCore::new("hash_test");
+        let mut interner = StringInternerCore::new();
         let mut dataset_name_to_id = HashMap::new();
 
         // Create test data

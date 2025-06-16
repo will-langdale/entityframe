@@ -6,20 +6,20 @@ use std::sync::Arc;
 /// String interning for efficient record ID storage and lookup.
 #[pyclass]
 #[derive(Clone)]
-pub struct StringInterner {
+pub struct StringInternerCore {
     strings: Vec<Arc<str>>,
     string_to_id: FxHashMap<Arc<str>, u32>,
     sorted_ids: Option<Vec<u32>>,
 }
 
-impl Default for StringInterner {
+impl Default for StringInternerCore {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[pymethods]
-impl StringInterner {
+impl StringInternerCore {
     #[new]
     pub fn new() -> Self {
         Self {
@@ -80,7 +80,7 @@ impl StringInterner {
     }
 }
 
-impl StringInterner {
+impl StringInternerCore {
     /// Get the string for a given ID (internal method returning Option).
     pub fn get_string_internal(&self, id: u32) -> Option<&str> {
         self.strings.get(id as usize).map(|s| s.as_ref())
@@ -170,7 +170,7 @@ impl StringInterner {
     }
 
     /// Merge another interner into this one, returning the ID remapping table
-    pub fn merge(&mut self, other: &StringInterner) -> std::collections::HashMap<u32, u32> {
+    pub fn merge(&mut self, other: &StringInternerCore) -> std::collections::HashMap<u32, u32> {
         use std::collections::HashMap;
 
         // Invalidate sorted cache since we're adding new strings
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_string_interner_basic() {
-        let mut interner = StringInterner::new();
+        let mut interner = StringInternerCore::new();
 
         // Test interning
         let id1 = interner.intern("hello");
@@ -222,8 +222,8 @@ mod tests {
 
     #[test]
     fn test_string_interner_merge() {
-        let mut interner1 = StringInterner::new();
-        let mut interner2 = StringInterner::new();
+        let mut interner1 = StringInternerCore::new();
+        let mut interner2 = StringInternerCore::new();
 
         // Add strings to both interners
         let id1_a = interner1.intern("apple");
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_batch_intern_with_sort() {
-        let mut interner = StringInterner::new();
+        let mut interner = StringInternerCore::new();
 
         // Test batch processing with sorting
         let strings = vec![
@@ -307,7 +307,7 @@ mod tests {
     fn test_batch_intern_by_dataset() {
         use std::collections::HashMap;
 
-        let mut interner = StringInterner::new();
+        let mut interner = StringInternerCore::new();
 
         // Prepare dataset records
         let mut dataset_records = HashMap::new();

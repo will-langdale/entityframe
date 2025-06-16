@@ -2,15 +2,15 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::collections::HashMap;
 
-use crate::collection::EntityCollection;
-use crate::interner::StringInterner;
+use crate::collection::CollectionCore;
+use crate::interner::StringInternerCore;
 
-/// EntityFrame: A collection of EntityCollections with shared interner (like pandas DataFrame)
+/// EntityFrame: A collection of CollectionCores with shared interner (like pandas DataFrame)
 #[pyclass]
 pub struct EntityFrame {
-    collections: HashMap<String, EntityCollection>,
+    collections: HashMap<String, CollectionCore>,
     // Single interner for all strings (datasets and records)
-    interner: StringInterner,
+    interner: StringInternerCore,
     // Dataset name tracking for API convenience
     dataset_name_to_id: HashMap<String, u32>,
 }
@@ -27,7 +27,7 @@ impl EntityFrame {
     pub fn new() -> Self {
         Self {
             collections: HashMap::new(),
-            interner: StringInterner::new(),
+            interner: StringInternerCore::new(),
             dataset_name_to_id: HashMap::new(),
         }
     }
@@ -66,17 +66,17 @@ impl EntityFrame {
 
     /// Get a reference to the shared interner
     #[getter]
-    pub fn interner(&self) -> StringInterner {
+    pub fn interner(&self) -> StringInternerCore {
         self.interner.clone()
     }
 
     /// Create a new collection that will use this frame's shared interner
-    pub fn create_collection(&self, name: &str) -> EntityCollection {
-        EntityCollection::new(name)
+    pub fn create_collection(&self, name: &str) -> CollectionCore {
+        CollectionCore::new(name)
     }
 
     /// Add a collection to the frame (simple - no ID remapping needed)
-    pub fn add_collection(&mut self, name: &str, collection: EntityCollection) {
+    pub fn add_collection(&mut self, name: &str, collection: CollectionCore) {
         self.collections.insert(name.to_string(), collection);
     }
 
@@ -148,7 +148,7 @@ impl EntityFrame {
     }
 
     /// Get a collection by name
-    pub fn get_collection(&self, name: &str) -> Option<EntityCollection> {
+    pub fn get_collection(&self, name: &str) -> Option<CollectionCore> {
         self.collections.get(name).cloned()
     }
 
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn test_entity_frame_add_collection() {
         let mut frame = EntityFrame::new();
-        let collection = EntityCollection::new("splink");
+        let collection = CollectionCore::new("splink");
 
         frame.add_collection("splink", collection);
 

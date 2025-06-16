@@ -1,12 +1,12 @@
 """
-Python wrapper for EntityCollection to provide convenient hash and metadata methods.
+Python wrapper for CollectionCore to provide convenient hash and metadata methods.
 """
 
 from typing import Any, Dict, Iterator
 
 
-class CollectionWrapper:
-    """Wrapper for EntityCollection with convenient hashing and access methods."""
+class Collection:
+    """Wrapper for CollectionCore with convenient hashing and access methods."""
 
     def __init__(self, frame: Any, collection_name: str) -> None:
         self.frame = frame

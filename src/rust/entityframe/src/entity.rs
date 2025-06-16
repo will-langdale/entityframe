@@ -5,14 +5,14 @@ use std::collections::HashMap;
 /// Core entity representation using roaring bitmaps for record ID sets.
 /// Uses interned dataset IDs (u32) instead of strings for massive memory savings.
 #[pyclass]
-pub struct Entity {
+pub struct EntityCore {
     datasets: HashMap<u32, RoaringBitmap>,
     metadata: Option<HashMap<u32, PyObject>>,
     /// Pre-computed sorted record order for each dataset (for fast hashing)
     sorted_records: HashMap<u32, Vec<u32>>,
 }
 
-impl Clone for Entity {
+impl Clone for EntityCore {
     fn clone(&self) -> Self {
         Python::with_gil(|py| {
             let metadata = self
@@ -29,14 +29,14 @@ impl Clone for Entity {
     }
 }
 
-impl Default for Entity {
+impl Default for EntityCore {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[pymethods]
-impl Entity {
+impl EntityCore {
     #[new]
     pub fn new() -> Self {
         Self {
@@ -143,7 +143,7 @@ impl Entity {
     }
 
     /// Compute Jaccard similarity with another entity.
-    pub fn jaccard_similarity(&self, other: &Entity) -> f64 {
+    pub fn jaccard_similarity(&self, other: &EntityCore) -> f64 {
         let mut union_size = 0u64;
         let mut intersection_size = 0u64;
 
@@ -209,7 +209,7 @@ impl Entity {
     }
 }
 
-impl Entity {
+impl EntityCore {
     /// Create a new entity with pre-computed sorted order.
     /// Avoids the O(R log R) sorting cost per entity.
     pub fn from_sorted_data(
@@ -329,7 +329,7 @@ impl Entity {
     /// Uses pre-computed sorted order for optimal performance.
     pub fn deterministic_hash(
         &self,
-        interner: &mut crate::interner::StringInterner,
+        interner: &mut crate::interner::StringInternerCore,
         algorithm: &str,
     ) -> PyResult<Vec<u8>> {
         // Use unified hasher from hash module
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn test_entity_basic() {
-        let mut entity = Entity::new();
+        let mut entity = EntityCore::new();
 
         // Test adding records
         entity.add_record("customers", 1);
@@ -409,11 +409,11 @@ mod tests {
 
     #[test]
     fn test_jaccard_similarity() {
-        let mut entity1 = Entity::new();
+        let mut entity1 = EntityCore::new();
         entity1.add_records("customers", vec![1, 2, 3]);
         entity1.add_records("transactions", vec![10, 11]);
 
-        let mut entity2 = Entity::new();
+        let mut entity2 = EntityCore::new();
         entity2.add_records("customers", vec![2, 3, 4]);
         entity2.add_records("transactions", vec![11, 12]);
 
@@ -426,8 +426,8 @@ mod tests {
 
     #[test]
     fn test_jaccard_with_same_datasets_different_records() {
-        let mut entity1 = Entity::new();
-        let mut entity2 = Entity::new();
+        let mut entity1 = EntityCore::new();
+        let mut entity2 = EntityCore::new();
 
         // Both entities have "customers" dataset but different records
         entity1.add_records_by_id(0, vec![10, 11]);
@@ -440,8 +440,8 @@ mod tests {
 
     #[test]
     fn test_jaccard_with_overlapping_records() {
-        let mut entity1 = Entity::new();
-        let mut entity2 = Entity::new();
+        let mut entity1 = EntityCore::new();
+        let mut entity2 = EntityCore::new();
 
         // Both entities have "customers" dataset with some overlapping records
         entity1.add_records_by_id(0, vec![10, 11]);
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_entity_remap_basic() {
-        let mut entity = Entity::new();
+        let mut entity = EntityCore::new();
 
         // Add records using public API
         entity.add_records_by_id(0, vec![10, 11]);
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn test_entity_remap_dataset_collision() {
-        let mut entity = Entity::new();
+        let mut entity = EntityCore::new();
 
         // Create two datasets that will be remapped to the same ID
         entity.add_records_by_id(0, vec![10, 11]);
@@ -533,7 +533,7 @@ mod tests {
         sorted_records.insert(1, vec![100, 200]); // Already sorted
 
         // Create entity from batch data
-        let entity = Entity::from_sorted_data(dataset_bitmaps, sorted_records);
+        let entity = EntityCore::from_sorted_data(dataset_bitmaps, sorted_records);
 
         // Verify entity has sorted records
         assert!(entity.has_sorted_records());
@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn test_entity_sorted_records_invalidation() {
-        let mut entity = Entity::new();
+        let mut entity = EntityCore::new();
 
         // Add some records through normal API (should not have sorted records)
         entity.add_records_by_id(0, vec![10, 20]);
@@ -584,10 +584,10 @@ mod tests {
 
     #[test]
     fn test_optimised_hash_consistency() {
-        use crate::interner::StringInterner;
+        use crate::interner::StringInternerCore;
         use roaring::RoaringBitmap;
 
-        let mut interner = StringInterner::new();
+        let mut interner = StringInternerCore::new();
 
         // Create test data with specific strings for deterministic testing
         let dataset1_name = "customers";
@@ -625,10 +625,11 @@ mod tests {
         sorted_records.insert(dataset1_id, vec![record2_id, record3_id, record1_id]); // customer_a, customer_m, customer_z
         sorted_records.insert(dataset2_id, vec![record5_id, record4_id]); // order_a, order_b
 
-        let entity_optimised = Entity::from_sorted_data(dataset_bitmaps.clone(), sorted_records);
+        let entity_optimised =
+            EntityCore::from_sorted_data(dataset_bitmaps.clone(), sorted_records);
 
         // Create entity without batch processing (no sorted records)
-        let mut entity_fallback = Entity::new();
+        let mut entity_fallback = EntityCore::new();
         entity_fallback.datasets = dataset_bitmaps;
 
         // Both entities should produce the same hash
@@ -657,10 +658,10 @@ mod tests {
 
     #[test]
     fn test_hash_performance_paths() {
-        use crate::interner::StringInterner;
+        use crate::interner::StringInternerCore;
         use roaring::RoaringBitmap;
 
-        let mut interner = StringInterner::new();
+        let mut interner = StringInternerCore::new();
 
         // Create a larger test case to verify performance benefits
         let dataset_id = interner.intern("test_dataset");
@@ -685,10 +686,10 @@ mod tests {
         });
         sorted_records.insert(dataset_id, sorted_record_ids);
 
-        let entity_fast = Entity::from_sorted_data(dataset_bitmaps, sorted_records);
+        let entity_fast = EntityCore::from_sorted_data(dataset_bitmaps, sorted_records);
 
         // Create entity without batch processing (slow path)
-        let mut entity_slow = Entity::new();
+        let mut entity_slow = EntityCore::new();
         entity_slow.datasets.insert(dataset_id, bitmap);
 
         // Both should produce the same hash

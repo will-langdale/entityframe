@@ -1,12 +1,12 @@
 """
-Python wrapper for Entity to provide convenient access to metadata and hashing.
+Python wrapper for EntityCore to provide convenient access to metadata and hashing.
 """
 
 from typing import Any, Optional
 
 
-class EntityWrapper:
-    """Wrapper for Entity with convenient metadata and hashing methods."""
+class Entity:
+    """Wrapper for EntityCore with convenient metadata and hashing methods."""
 
     def __init__(self, frame: Any, collection_name: str, entity_index: int) -> None:
         self.frame = frame

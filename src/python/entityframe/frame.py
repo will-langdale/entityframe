@@ -4,7 +4,7 @@ Python wrapper for EntityFrame to provide convenient collection attribute access
 
 from __future__ import annotations
 from typing import Any, Dict, List
-from .collection import CollectionWrapper
+from .collection import Collection
 from .entityframe import EntityFrame as RustEntityFrame
 
 
@@ -14,7 +14,7 @@ class EntityFrame:
     def __init__(self) -> None:
         """Initialize EntityFrame."""
         self._frame = RustEntityFrame()
-        self._collection_wrappers: Dict[str, CollectionWrapper] = {}
+        self._collection_wrappers: Dict[str, Collection] = {}
 
     def declare_dataset(self, name: str) -> None:
         """
@@ -49,7 +49,7 @@ class EntityFrame:
             name: Collection name
 
         Returns:
-            CollectionWrapper for the named collection
+            Collection for the named collection
 
         Raises:
             AttributeError: If collection doesn't exist
@@ -64,7 +64,7 @@ class EntityFrame:
                 # Verify collection exists
                 _ = self._frame.get_collection(name)
                 # Cache the wrapper
-                self._collection_wrappers[name] = CollectionWrapper(self._frame, name)
+                self._collection_wrappers[name] = Collection(self._frame, name)
             return self._collection_wrappers[name]
         except Exception:
             # If collection doesn't exist, raise AttributeError for proper Python behavior
