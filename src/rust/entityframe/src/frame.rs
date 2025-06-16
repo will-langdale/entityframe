@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::collection::CollectionCore;
 use crate::interner::StringInternerCore;
@@ -385,6 +386,114 @@ impl EntityFrame {
 
         collection.verify_hashes(&mut self.interner, algorithm)
     }
+
+    /// Get string representation for Python
+    pub fn __str__(&self) -> String {
+        format!("{}", self)
+    }
+
+    /// Get string representation for Python (same as __str__)
+    pub fn __repr__(&self) -> String {
+        format!("{}", self)
+    }
+}
+
+impl fmt::Display for EntityFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use comfy_table::{
+            modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Attribute, Cell, ContentArrangement,
+            Table,
+        };
+
+        // If no collections, return empty message
+        if self.collections.is_empty() {
+            return write!(f, "EntityFrame (empty)");
+        }
+
+        // Get all collection names and dataset names
+        let mut collection_names: Vec<&String> = self.collections.keys().collect();
+        collection_names.sort();
+
+        let mut dataset_names: Vec<&String> = self.dataset_name_to_id.keys().collect();
+        dataset_names.sort();
+
+        // If no datasets, show basic info
+        if dataset_names.is_empty() {
+            return write!(
+                f,
+                "EntityFrame with {} collection(s), no datasets",
+                self.collections.len()
+            );
+        }
+
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .apply_modifier(UTF8_ROUND_CORNERS)
+            .set_content_arrangement(ContentArrangement::Dynamic);
+
+        // Create header row with empty first cell and collection names
+        let mut header = vec![Cell::new("").add_attribute(Attribute::Bold)];
+        for collection_name in &collection_names {
+            header.push(Cell::new(collection_name).add_attribute(Attribute::Bold));
+        }
+        table.set_header(header);
+
+        // Add Entities row
+        let mut entities_row = vec![Cell::new("**Entities**").add_attribute(Attribute::Bold)];
+        for collection_name in &collection_names {
+            let entity_count = if let Some(collection) = self.collections.get(*collection_name) {
+                collection.len()
+            } else {
+                0
+            };
+            entities_row.push(Cell::new(entity_count.to_string()));
+        }
+        table.add_row(entities_row);
+
+        // Add Datasets header row
+        let mut datasets_header_row =
+            vec![Cell::new("**Datasets**").add_attribute(Attribute::Bold)];
+        for _ in &collection_names {
+            datasets_header_row.push(Cell::new(""));
+        }
+        table.add_row(datasets_header_row);
+
+        // Add rows for each dataset with tree-style prefixes
+        for (i, dataset_name) in dataset_names.iter().enumerate() {
+            let is_last = i == dataset_names.len() - 1;
+            let prefix = if is_last { "└─ " } else { "├─ " };
+            let mut row = vec![Cell::new(format!("{}{}", prefix, dataset_name))];
+
+            for collection_name in &collection_names {
+                let count = if let Some(collection) = self.collections.get(*collection_name) {
+                    // Count unique records in this dataset across all entities in the collection
+                    let dataset_id = self
+                        .dataset_name_to_id
+                        .get(*dataset_name)
+                        .copied()
+                        .unwrap_or(u32::MAX);
+                    let mut unique_records = std::collections::HashSet::new();
+
+                    for entity in &collection.entities {
+                        if let Some(bitmap) = entity.get_datasets_map().get(&dataset_id) {
+                            for record_id in bitmap.iter() {
+                                unique_records.insert(record_id);
+                            }
+                        }
+                    }
+                    unique_records.len()
+                } else {
+                    0
+                };
+
+                row.push(Cell::new(count.to_string()));
+            }
+            table.add_row(row);
+        }
+
+        write!(f, "{}", table)
+    }
 }
 
 #[cfg(test)]
@@ -611,5 +720,153 @@ mod tests {
         let all_hashes = frame.hash_all_entities("blake3").unwrap();
         assert_eq!(all_hashes.len(), 1); // One collection
         assert_eq!(all_hashes["test_batch"].len(), 3); // Three entities
+    }
+
+    #[test]
+    fn test_entity_frame_display_format() {
+        use std::collections::HashMap;
+
+        let mut frame = EntityFrame::new();
+
+        // Create sample data similar to the user's example
+        // aggressive method
+        let aggressive_data = vec![
+            {
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["c1".to_string(), "c2".to_string()],
+                );
+                data.insert(
+                    "transactions".to_string(),
+                    vec!["t1".to_string(), "t2".to_string(), "t3".to_string()],
+                );
+                data.insert(
+                    "messages".to_string(),
+                    vec!["m1".to_string(), "m2".to_string()],
+                );
+                data
+            },
+            {
+                let mut data = HashMap::new();
+                data.insert(
+                    "customers".to_string(),
+                    vec!["c3".to_string(), "c4".to_string(), "c5".to_string()],
+                );
+                data.insert(
+                    "transactions".to_string(),
+                    vec![
+                        "t4".to_string(),
+                        "t5".to_string(),
+                        "t6".to_string(),
+                        "t7".to_string(),
+                    ],
+                );
+                data.insert(
+                    "messages".to_string(),
+                    vec![
+                        "m3".to_string(),
+                        "m4".to_string(),
+                        "m5".to_string(),
+                        "m6".to_string(),
+                    ],
+                );
+                data
+            },
+        ];
+
+        // conservative method
+        let conservative_data = vec![{
+            let mut data = HashMap::new();
+            data.insert(
+                "customers".to_string(),
+                vec!["c1".to_string(), "c2".to_string(), "c3".to_string()],
+            );
+            data.insert(
+                "transactions".to_string(),
+                vec![
+                    "t1".to_string(),
+                    "t2".to_string(),
+                    "t3".to_string(),
+                    "t4".to_string(),
+                    "t5".to_string(),
+                ],
+            );
+            data.insert(
+                "messages".to_string(),
+                vec![
+                    "m1".to_string(),
+                    "m2".to_string(),
+                    "m3".to_string(),
+                    "m4".to_string(),
+                    "m5".to_string(),
+                    "m6".to_string(),
+                    "m7".to_string(),
+                ],
+            );
+            data
+        }];
+
+        // Add collections using the internal API
+        let mut aggressive_collection = frame.create_collection("aggressive");
+        aggressive_collection.add_entities(
+            aggressive_data,
+            &mut frame.interner,
+            &mut frame.dataset_name_to_id,
+        );
+        frame.add_collection("aggressive", aggressive_collection);
+
+        let mut conservative_collection = frame.create_collection("conservative");
+        conservative_collection.add_entities(
+            conservative_data,
+            &mut frame.interner,
+            &mut frame.dataset_name_to_id,
+        );
+        frame.add_collection("conservative", conservative_collection);
+
+        // Get the display output
+        let display_output = format!("{}", frame);
+
+        // Verify basic structure
+        assert!(display_output.contains("aggressive"));
+        assert!(display_output.contains("conservative"));
+        assert!(display_output.contains("**Entities**"));
+        assert!(display_output.contains("**Datasets**"));
+        assert!(display_output.contains("├─ customers"));
+        assert!(display_output.contains("├─ messages"));
+        assert!(display_output.contains("└─ transactions")); // Last dataset should have └─
+
+        // Verify entity counts
+        // aggressive: 2 entities, conservative: 1 entity
+        let lines: Vec<&str> = display_output.lines().collect();
+        let entities_line = lines
+            .iter()
+            .find(|line| line.contains("**Entities**"))
+            .unwrap();
+        // Should contain "2" and "1" for entity counts
+        assert!(entities_line.contains("2"));
+        assert!(entities_line.contains("1"));
+
+        // Verify some dataset record counts
+        // customers: aggressive has c1,c2,c3,c4,c5 (5 unique), conservative has c1,c2,c3 (3 unique)
+        let customers_line = lines
+            .iter()
+            .find(|line| line.contains("customers"))
+            .unwrap();
+        assert!(customers_line.contains("5")); // aggressive
+        assert!(customers_line.contains("3")); // conservative
+
+        // transactions: aggressive has t1,t2,t3,t4,t5,t6,t7 (7 unique), conservative has t1,t2,t3,t4,t5 (5 unique)
+        let transactions_line = lines
+            .iter()
+            .find(|line| line.contains("transactions"))
+            .unwrap();
+        assert!(transactions_line.contains("7")); // aggressive
+        assert!(transactions_line.contains("5")); // conservative
+
+        // messages: aggressive has m1,m2,m3,m4,m5,m6 (6 unique), conservative has m1,m2,m3,m4,m5,m6,m7 (7 unique)
+        let messages_line = lines.iter().find(|line| line.contains("messages")).unwrap();
+        assert!(messages_line.contains("6")); // aggressive
+        assert!(messages_line.contains("7")); // conservative
     }
 }

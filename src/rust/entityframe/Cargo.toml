@@ -17,6 +17,7 @@ sha3 = "0.10"
 blake3 = "1.5"
 hex = "0.4"
 rayon = "1.10"
+comfy-table = "7.1"
 
 [features]
 extension-module = ["pyo3/extension-module"]

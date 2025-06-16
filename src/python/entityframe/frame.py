@@ -99,3 +99,11 @@ class EntityFrame:
     def interner(self) -> Any:
         """Access to the internal string interner."""
         return self._frame.interner
+
+    def __str__(self) -> str:
+        """Return pretty printed representation of the EntityFrame."""
+        return str(self._frame.__str__())
+
+    def __repr__(self) -> str:
+        """Return pretty printed representation of the EntityFrame."""
+        return str(self._frame.__repr__())
