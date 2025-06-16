@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -132,11 +133,14 @@ impl EntityCollection {
         let hash_key = interner.intern("hash");
 
         // Add hash to each entity's metadata
-        for (entity, hash) in self.entities.iter_mut().zip(hashes) {
-            entity.set_metadata(hash_key, hash);
-        }
-
-        Ok(())
+        Python::with_gil(|py| {
+            for (entity, hash) in self.entities.iter_mut().zip(hashes) {
+                // Convert hash bytes to Python bytes object
+                let py_bytes = PyBytes::new(py, &hash).into_pyobject(py)?.into_any();
+                entity.set_metadata(hash_key, py_bytes.unbind());
+            }
+            Ok(())
+        })
     }
 
     /// Verify hashes for all entities in this collection
@@ -162,15 +166,22 @@ impl EntityCollection {
         let current_hashes = self.hash_all_entities(interner, algorithm)?;
 
         // Compare with stored hashes
-        for (entity, current_hash) in self.entities.iter().zip(current_hashes) {
-            if let Some(stored_hash) = entity.get_metadata_by_id(hash_key) {
-                if stored_hash != current_hash {
-                    return Ok(false); // Hash mismatch found
+        Python::with_gil(|py| {
+            for (entity, current_hash) in self.entities.iter().zip(current_hashes) {
+                if let Some(stored_hash_obj) = entity.get_metadata_by_id(hash_key) {
+                    // Extract bytes from the Python object
+                    if let Ok(stored_bytes) = stored_hash_obj.downcast_bound::<PyBytes>(py) {
+                        if stored_bytes.as_bytes() != current_hash {
+                            return Ok(false); // Hash mismatch found
+                        }
+                    } else {
+                        // If it's not bytes, consider it a mismatch
+                        return Ok(false);
+                    }
                 }
             }
-        }
-
-        Ok(true) // All hashes verified successfully
+            Ok(true) // All hashes verified successfully
+        })
     }
 }
 

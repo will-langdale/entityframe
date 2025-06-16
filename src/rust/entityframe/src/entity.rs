@@ -6,12 +6,28 @@ use std::hash::{Hash, Hasher};
 /// Core entity representation using roaring bitmaps for record ID sets.
 /// Uses interned dataset IDs (u32) instead of strings for massive memory savings.
 #[pyclass]
-#[derive(Clone)]
 pub struct Entity {
     datasets: HashMap<u32, RoaringBitmap>,
-    metadata: Option<HashMap<u32, Vec<u8>>>,
+    metadata: Option<HashMap<u32, PyObject>>,
     /// Pre-computed sorted record order for each dataset (for fast hashing)
     sorted_records: HashMap<u32, Vec<u32>>,
+}
+
+impl Clone for Entity {
+    fn clone(&self) -> Self {
+        Python::with_gil(|py| {
+            let metadata = self
+                .metadata
+                .as_ref()
+                .map(|map| map.iter().map(|(k, v)| (*k, v.clone_ref(py))).collect());
+
+            Self {
+                datasets: self.datasets.clone(),
+                metadata,
+                sorted_records: self.sorted_records.clone(),
+            }
+        })
+    }
 }
 
 impl Default for Entity {
@@ -153,7 +169,7 @@ impl Entity {
     }
 
     /// Set metadata for a key (requires interner for key interning).
-    pub fn set_metadata(&mut self, key_id: u32, value: Vec<u8>) {
+    pub fn set_metadata(&mut self, key_id: u32, value: PyObject) {
         if self.metadata.is_none() {
             self.metadata = Some(HashMap::new());
         }
@@ -161,11 +177,8 @@ impl Entity {
     }
 
     /// Get metadata by key ID (internal method).
-    pub fn get_metadata_by_id(&self, key_id: u32) -> Option<&[u8]> {
-        self.metadata
-            .as_ref()
-            .and_then(|m| m.get(&key_id))
-            .map(|v| v.as_slice())
+    pub fn get_metadata_by_id(&self, key_id: u32) -> Option<&PyObject> {
+        self.metadata.as_ref().and_then(|m| m.get(&key_id))
     }
 
     /// Check if metadata key exists.

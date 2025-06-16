@@ -13,18 +13,17 @@ class EntityWrapper:
         self.collection_name = collection_name
         self.entity_index = entity_index
 
-    def set_metadata(self, key: str, value: bytes) -> None:
+    def set_metadata(self, key: str, value: Any) -> None:
         """Set metadata on this entity."""
         self.frame.set_entity_metadata(
             self.collection_name, self.entity_index, key, value
         )
 
-    def get_metadata(self, key: str) -> Optional[bytes]:
+    def get_metadata(self, key: str) -> Optional[Any]:
         """Get metadata from this entity."""
-        result = self.frame.get_entity_metadata(
+        return self.frame.get_entity_metadata(
             self.collection_name, self.entity_index, key
         )
-        return result if result is None else bytes(result)
 
     def hash(self, algorithm: str = "sha256") -> bytes:
         """

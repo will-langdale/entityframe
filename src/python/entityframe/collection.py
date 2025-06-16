@@ -87,9 +87,12 @@ class CollectionWrapper:
             # Convert key ID back to string using interner
             try:
                 key_name = self.frame.interner.get_string(key_id)
-                value_bytes = entity.get_metadata_by_id(key_id)
-                if value_bytes:
-                    metadata[key_name] = bytes(value_bytes)
+                # Use the frame API to get metadata which returns PyObject
+                value = self.frame.get_entity_metadata(
+                    self.collection_name, index, key_name
+                )
+                if value is not None:
+                    metadata[key_name] = value
             except Exception:
                 # Skip if we can't resolve the key name
                 continue

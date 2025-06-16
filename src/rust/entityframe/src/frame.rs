@@ -94,7 +94,7 @@ impl EntityFrame {
                 let entity_dict = entity_obj.downcast_bound::<pyo3::types::PyDict>(py)?;
 
                 let mut datasets = HashMap::new();
-                let mut metadata = HashMap::new();
+                let mut metadata: HashMap<u32, PyObject> = HashMap::new();
 
                 // Parse datasets and metadata
                 for (key, value) in entity_dict.iter() {
@@ -105,9 +105,9 @@ impl EntityFrame {
                         let metadata_dict = value.downcast::<pyo3::types::PyDict>()?;
                         for (meta_key, meta_value) in metadata_dict.iter() {
                             let meta_key_str: String = meta_key.extract()?;
-                            let meta_value_bytes: Vec<u8> = meta_value.extract()?;
+                            // Store the Python object directly
                             let meta_key_id = self.interner.intern(&meta_key_str);
-                            metadata.insert(meta_key_id, meta_value_bytes);
+                            metadata.insert(meta_key_id, meta_value.clone().unbind());
                         }
                     } else {
                         // Handle dataset records
@@ -231,7 +231,7 @@ impl EntityFrame {
         collection_name: &str,
         entity_index: usize,
         key: &str,
-        value: &[u8],
+        value: PyObject,
     ) -> PyResult<()> {
         let collection = self.collections.get_mut(collection_name).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
@@ -246,7 +246,7 @@ impl EntityFrame {
 
         // Intern the metadata key
         let key_id = self.interner.intern(key);
-        entity.set_metadata(key_id, value.to_vec());
+        entity.set_metadata(key_id, value);
         Ok(())
     }
 
@@ -256,7 +256,7 @@ impl EntityFrame {
         collection_name: &str,
         entity_index: usize,
         key: &str,
-    ) -> PyResult<Option<Vec<u8>>> {
+    ) -> PyResult<Option<PyObject>> {
         let collection = self.collections.get(collection_name).ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
                 "Collection '{}' not found",
@@ -270,7 +270,12 @@ impl EntityFrame {
 
         // Try to intern the key to get its ID (this won't add it if it doesn't exist)
         let key_id = self.interner.intern(key);
-        Ok(entity.get_metadata_by_id(key_id).map(|v| v.to_vec()))
+
+        Python::with_gil(|py| {
+            Ok(entity
+                .get_metadata_by_id(key_id)
+                .map(|obj| obj.clone_ref(py)))
+        })
     }
 
     /// Compute hash of an entity
