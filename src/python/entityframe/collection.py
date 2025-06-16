@@ -56,19 +56,11 @@ class CollectionWrapper:
         # Get the raw entity
         entity = current_collection.get_entity(index)
 
-        # Get datasets for this entity - need to try different dataset names
-        # since get_dataset_names() isn't implemented yet
+        # Get datasets for this entity using the frame's dataset registry
         datasets = {}
-        test_datasets = [
-            "customers",
-            "emails",
-            "transactions",
-            "orders",
-            "users",
-            "products",
-        ]
+        dataset_names = self.frame.get_dataset_names()
 
-        for dataset_name in test_datasets:
+        for dataset_name in dataset_names:
             try:
                 records = entity.get_records(dataset_name)
                 if records:  # Only include datasets that have records
