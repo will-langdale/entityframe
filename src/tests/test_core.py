@@ -3,7 +3,7 @@ Tests for core EntityFrame components: StringInterner and Entity.
 """
 
 import pytest
-from entityframe import StringInterner, Entity
+from entityframe import StringInterner, EntityCore
 
 
 class TestStringInterner:
@@ -79,7 +79,7 @@ class TestEntity:
 
     def test_entity_creation(self):
         """Test basic entity creation and record addition."""
-        entity = Entity()
+        entity = EntityCore()
 
         # Test adding individual records
         entity.add_record("customers", 1)
@@ -134,7 +134,7 @@ class TestEntity:
 
     def test_empty_dataset_retrieval(self):
         """Test retrieving records from non-existent datasets."""
-        entity = Entity()
+        entity = EntityCore()
 
         # Should return empty list for non-existent dataset
         records = entity.get_records("nonexistent")
@@ -142,7 +142,7 @@ class TestEntity:
 
     def test_duplicate_record_handling(self):
         """Test that duplicate records are handled correctly by roaring bitmaps."""
-        entity = Entity()
+        entity = EntityCore()
 
         # Add the same record multiple times
         entity.add_record("customers", 1)
@@ -155,11 +155,11 @@ class TestEntity:
 
     def test_jaccard_similarity_identical(self):
         """Test Jaccard similarity for identical entities."""
-        entity1 = Entity()
+        entity1 = EntityCore()
         entity1.add_records("customers", [1, 2, 3])
         entity1.add_records("transactions", [10, 11])
 
-        entity2 = Entity()
+        entity2 = EntityCore()
         entity2.add_records("customers", [1, 2, 3])
         entity2.add_records("transactions", [10, 11])
 
@@ -168,10 +168,10 @@ class TestEntity:
 
     def test_jaccard_similarity_disjoint(self):
         """Test Jaccard similarity for completely disjoint entities."""
-        entity1 = Entity()
+        entity1 = EntityCore()
         entity1.add_records("customers", [1, 2, 3])
 
-        entity2 = Entity()
+        entity2 = EntityCore()
         entity2.add_records("customers", [4, 5, 6])
 
         similarity = entity1.jaccard_similarity(entity2)
@@ -179,11 +179,11 @@ class TestEntity:
 
     def test_jaccard_similarity_partial_overlap(self):
         """Test Jaccard similarity for partially overlapping entities."""
-        entity1 = Entity()
+        entity1 = EntityCore()
         entity1.add_records("customers", [1, 2, 3])
         entity1.add_records("transactions", [10, 11])
 
-        entity2 = Entity()
+        entity2 = EntityCore()
         entity2.add_records("customers", [2, 3, 4])
         entity2.add_records("transactions", [11, 12])
 
@@ -196,10 +196,10 @@ class TestEntity:
 
     def test_jaccard_similarity_different_datasets(self):
         """Test Jaccard similarity for entities with different datasets."""
-        entity1 = Entity()
+        entity1 = EntityCore()
         entity1.add_records("customers", [1, 2, 3])
 
-        entity2 = Entity()
+        entity2 = EntityCore()
         entity2.add_records("transactions", [1, 2, 3])
 
         # No overlap in datasets, so Jaccard = 0
@@ -208,15 +208,15 @@ class TestEntity:
 
     def test_jaccard_similarity_empty_entities(self):
         """Test Jaccard similarity for empty entities."""
-        entity1 = Entity()
-        entity2 = Entity()
+        entity1 = EntityCore()
+        entity2 = EntityCore()
 
         similarity = entity1.jaccard_similarity(entity2)
         assert similarity == 1.0  # Both empty, so considered identical
 
     def test_entity_with_multiple_datasets(self):
         """Test entity behaviour with multiple diverse datasets."""
-        entity = Entity()
+        entity = EntityCore()
 
         # Add records to various datasets
         entity.add_records("customers", [100, 101, 102])
@@ -239,7 +239,7 @@ class TestEntity:
 
     def test_entity_large_scale(self):
         """Test entity performance with large numbers of records."""
-        entity = Entity()
+        entity = EntityCore()
 
         # Add 10,000 records to a dataset
         large_record_set = list(range(10000))

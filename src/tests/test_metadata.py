@@ -1,7 +1,7 @@
 """Comprehensive test suite for entity metadata functionality."""
 
 import pytest
-from entityframe import EntityFrame, EntityWrapper
+from entityframe import EntityFrame, Entity
 
 
 # Basic Metadata Operations
@@ -151,7 +151,7 @@ def test_entity_wrapper_metadata():
     frame.add_method("test_method", [{"customers": ["c1", "c2"], "orders": ["o1"]}])
 
     # Create wrapper
-    entity = EntityWrapper(frame, "test_method", 0)
+    entity = Entity(frame, "test_method", 0)
 
     # Set various types of metadata
     entity.set_metadata("score", 0.95)
@@ -310,7 +310,7 @@ def test_entity_wrapper_hash():
     frame.add_method("test", [{"customers": ["c1", "c2"], "orders": ["o1"]}])
 
     # Create wrapper
-    entity = EntityWrapper(frame, "test", 0)
+    entity = Entity(frame, "test", 0)
 
     # Test hash methods
     hash_bytes = entity.hash()
@@ -349,7 +349,7 @@ def test_metadata_with_hash():
     frame.add_method("test", [{"customers": ["c1", "c2"], "orders": ["o1"]}])
 
     # Create wrapper
-    entity = EntityWrapper(frame, "test", 0)
+    entity = Entity(frame, "test", 0)
 
     # Compute hash and store as metadata
     entity_hash = entity.hash()

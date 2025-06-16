@@ -7,19 +7,19 @@ architecture: string interning, roaring bitmaps, and entity hashing.
 
 from .entityframe import StringInternerCore, EntityCore, CollectionCore
 from .frame import EntityFrame
-from .entity import Entity as EntityWrapper
+from .entity import Entity
 from .collection import Collection
 
-# Export clean names for users
+# Clean user-facing names
 StringInterner = StringInternerCore
-Entity = EntityCore  # For backward compatibility with tests
-EntityCollection = CollectionCore
 
 __all__ = [
     "StringInterner",
     "Entity",
     "Collection",
     "EntityFrame",
-    "EntityCollection",
-    "EntityWrapper",  # For tests that need the wrapper
+    # Core objects available for testing
+    "StringInternerCore",
+    "EntityCore",
+    "CollectionCore",
 ]
