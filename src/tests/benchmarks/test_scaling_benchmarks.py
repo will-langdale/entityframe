@@ -145,3 +145,120 @@ class TestScalingBenchmarks:
 
         # Verify all have hashes
         assert len(collection) == count
+
+    def test_million_scale_performance(self):
+        """Test performance at 1M scale to validate production readiness."""
+        count = 1_000_000
+        print(f"\nTesting EntityFrame at {count:,} entity scale...")
+
+        # Create realistic entities with string interning patterns
+        entities = []
+        print("Generating test data...")
+        for i in range(count):
+            entity = {
+                "users": [f"user_{i % 10_000}"],  # 10k unique users
+                "regions": [f"region_{i % 100}"],  # 100 unique regions
+                "products": [f"prod_{i % 1_000}"],  # 1k unique products
+                "categories": [f"cat_{i % 50}"],  # 50 unique categories
+            }
+            entities.append(entity)
+
+            # Progress indicator
+            if i % 100_000 == 0 and i > 0:
+                print(f"  Generated {i:,} entities...")
+
+        print("Creating EntityFrame...")
+        frame = EntityFrame()
+        frame.add_method("million_scale_test", entities)
+        collection = frame.million_scale_test
+
+        print("Starting hash benchmark...")
+        start = time.time()
+        collection.add_hash("blake3")
+        elapsed = time.time() - start
+
+        rate = count / elapsed if elapsed > 0 else 0
+        print(f"Completed: {rate:,.0f} entities/sec ({elapsed:.2f}s total)")
+
+        # Performance expectations for 1M entities
+        # Should process at least 50k entities/sec at this scale
+        assert rate > 50_000, f"Million scale too slow: {rate:,.0f} entities/sec"
+        assert len(collection) == count
+
+        # Verify string interning efficiency
+        dataset_names = frame.get_dataset_names()
+        assert len(dataset_names) == 4  # users, regions, products, categories
+
+        # Sample verification - check every 100,000th entity
+        print("Verifying sample entities...")
+        for i in range(0, count, 100_000):
+            entity = collection[i]
+            assert "hash" in entity["metadata"]
+            assert len(entity["metadata"]["hash"]) == 32  # blake3 hash size
+
+        print("✓ Million scale test completed successfully!")
+        print(f"  Performance: {rate:,.0f} entities/sec")
+        print(f"  Memory efficiency: {len(dataset_names)} unique datasets")
+
+    def test_comparison_scaling_performance(self):
+        """Test entity comparison performance at larger scales."""
+        count = 10_000  # Comparison is O(n) so test at reasonable scale
+
+        # Create two methods with partial overlap
+        entities1 = []
+        entities2 = []
+
+        for i in range(count):
+            # Method 1: base entities
+            entities1.append(
+                {
+                    "users": [f"user_{i}"],
+                    "orders": [f"order_{i}"],
+                }
+            )
+
+            # Method 2: 50% overlap with method 1
+            if i < count // 2:
+                # First half overlaps exactly
+                entities2.append(
+                    {
+                        "users": [f"user_{i}"],
+                        "orders": [f"order_{i}"],
+                    }
+                )
+            else:
+                # Second half is different
+                entities2.append(
+                    {
+                        "users": [f"user_{i + count}"],
+                        "orders": [f"order_{i + count}"],
+                    }
+                )
+
+        frame = EntityFrame()
+        frame.add_method("method1", entities1)
+        frame.add_method("method2", entities2)
+
+        # Measure comparison performance
+        start = time.time()
+        comparisons = frame.compare_collections("method1", "method2")
+        elapsed = time.time() - start
+
+        rate = count / elapsed if elapsed > 0 else 0
+
+        # Should compare at least 5k entities/sec
+        assert rate > 5_000, f"Comparison too slow: {rate:,.0f} entities/sec"
+        assert len(comparisons) == count
+
+        # Verify correctness of comparison results
+        # First half should have jaccard = 1.0 (identical)
+        # Second half should have jaccard = 0.0 (no overlap)
+        first_half_perfect = all(
+            comp["jaccard"] == 1.0 for comp in comparisons[: count // 2]
+        )
+        second_half_zero = all(
+            comp["jaccard"] == 0.0 for comp in comparisons[count // 2 :]
+        )
+
+        assert first_half_perfect, "First half comparisons should be perfect matches"
+        assert second_half_zero, "Second half comparisons should have no overlap"
