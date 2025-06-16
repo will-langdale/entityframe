@@ -1,7 +1,6 @@
 use pyo3::prelude::*;
 use roaring::RoaringBitmap;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 /// Core entity representation using roaring bitmaps for record ID sets.
 /// Uses interned dataset IDs (u32) instead of strings for massive memory savings.
@@ -82,10 +81,17 @@ impl Entity {
 
     /// Simple hash function for dataset names (used in Python API).
     pub fn hash_dataset_name(&self, dataset: &str) -> u32 {
-        use std::collections::hash_map::DefaultHasher;
-        let mut hasher = DefaultHasher::new();
-        dataset.hash(&mut hasher);
-        hasher.finish() as u32
+        use blake3::Hasher;
+        let mut hasher = Hasher::new();
+        hasher.update(dataset.as_bytes());
+        let hash = hasher.finalize();
+        // Use first 4 bytes of Blake3 hash
+        u32::from_le_bytes([
+            hash.as_bytes()[0],
+            hash.as_bytes()[1],
+            hash.as_bytes()[2],
+            hash.as_bytes()[3],
+        ])
     }
 
     /// Get record IDs for a dataset as a list (Python API).

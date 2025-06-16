@@ -268,8 +268,11 @@ impl EntityFrame {
             PyErr::new::<pyo3::exceptions::PyIndexError, _>("Entity index out of range")
         })?;
 
-        // Try to intern the key to get its ID (this won't add it if it doesn't exist)
-        let key_id = self.interner.intern(key);
+        // Look up the key ID without adding it to the interner
+        let key_id = match self.interner.lookup(key) {
+            Some(id) => id,
+            None => return Ok(None), // Key not found, return None
+        };
 
         Python::with_gil(|py| {
             Ok(entity

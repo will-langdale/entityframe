@@ -64,6 +64,11 @@ impl StringInterner {
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyIndexError, _>("Invalid string ID"))
     }
 
+    /// Look up a string and return its ID if it exists (does not add new strings).
+    pub fn lookup(&self, s: &str) -> Option<u32> {
+        self.string_to_id.get(s).copied()
+    }
+
     /// Get the number of interned strings.
     pub fn len(&self) -> usize {
         self.strings.len()
@@ -204,6 +209,11 @@ mod tests {
         // Test retrieval
         assert_eq!(interner.get_string(id1).unwrap(), "hello");
         assert_eq!(interner.get_string(id2).unwrap(), "world");
+
+        // Test lookup
+        assert_eq!(interner.lookup("hello"), Some(0));
+        assert_eq!(interner.lookup("world"), Some(1));
+        assert_eq!(interner.lookup("nonexistent"), None);
 
         // Test length
         assert_eq!(interner.len(), 2);
