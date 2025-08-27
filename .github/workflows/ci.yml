@@ -53,6 +53,9 @@ jobs:
       uses: astral-sh/setup-uv@v6
       with:
         python-version: "3.13"
+
+    - name: Install just
+      uses: extractions/setup-just@v2
     
     - name: Install dependencies
       run: just install
@@ -135,7 +138,7 @@ jobs:
   ci-success:
     needs: [format-and-lint, test-python, test-os, build-docs, build-package]
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: CI Success
         run: echo "All CI checks passed!"
