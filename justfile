@@ -54,3 +54,7 @@ clean:
     rm -rf target/
     find src/ -name "*.pyc" -delete
     find src/ -name "__pycache__" -delete
+
+# Run a local documentation development server
+docs:
+    uv run mkdocs serve
