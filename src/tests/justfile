@@ -1,0 +1,37 @@
+set working-directory := "../.."
+
+# Internal Rust test runner
+_rust:
+    @echo "Building Rust extension for tests..."
+    uv run maturin develop
+    #!/usr/bin/env bash
+    # Set the python interpreter for PYO3
+    export PYO3_PYTHON=$(uv run which python)
+    cargo test --no-default-features
+
+# Run quick tests (Python non-slow + Rust)
+default: python-quick _rust
+    @echo "✅ Ran quick tests (Python + Rust)."
+
+# Run all tests including slow/scale tests
+scale: python-all _rust
+    @echo "✅ Ran all tests including scale tests (Python + Rust)."
+
+# Run all Python tests
+python-all:
+    @echo "Running all Python tests (including slow)..."
+    uv run pytest
+
+# Run quick Python tests (excluding slow)
+python-quick:
+    @echo "Running quick Python tests (excluding slow)..."
+    uv run pytest -m "not slow"
+
+# Run only slow Python tests
+slow:
+    @echo "Running only slow Python tests..."
+    uv run pytest -m "slow"
+
+# Run only Rust tests
+rust: _rust
+    @echo "✅ Ran Rust tests."
