@@ -1,14 +1,16 @@
-# EntityFrame Design Document B: Technical Implementation
+# EntityFrame Design Document B: Technical implementation
 
-## Layer 2: Computer Science Techniques
+## Layer 2: Computer science techniques
 
-### Core Data Structure Architecture
+### Core data structure architecture
 
-**Multi-Collection EntityFrame Structure**
+**Multi-collection EntityFrame structure**
 
 ```rust
 pub struct EntityFrame {
-    // Multiple collections sharing same record space
+    // Multiple hierarchies (collections) sharing same record space
+    // Note: We use HashMap<CollectionId, EntityCollection> for implementation,
+    // but mathematically this represents {H₁, H₂, ..., Hₙ}
     collections: HashMap<CollectionId, EntityCollection>,
     
     // Shared interned record storage
@@ -23,10 +25,9 @@ pub struct EntityFrame {
 
 pub struct EntityCollection {
     // The hierarchical partition structure
+    // Note: Mathematically, the collection IS the hierarchy.
+    // This struct wraps it with metadata for implementation purposes.
     hierarchy: PartitionHierarchy,
-    
-    // Optional similarity/provenance data
-    similarity_data: Option<SimilarityMatrix>,
     
     // Collection metadata
     metadata: CollectionMetadata,
@@ -45,14 +46,22 @@ pub struct InternedRecordStorage {
 
 pub struct InternedRecord {
     source_id: u16,     // Interned source identifier
-    local_id: u32,      // ID within that source
+    local_id: LocalId,  // ID within that source (flexible type)
     attributes: Option<RecordData>,  // Optional attribute data
+}
+
+/// Flexible key types for record identification
+pub enum LocalId {
+    U32(u32),
+    U64(u64),
+    String(InternedString),
+    Bytes(Vec<u8>),
 }
 ```
 
-### Efficient Hierarchical Data Structures
+### Efficient hierarchical data structures
 
-**Partition Hierarchy with RoaringBitmaps**
+**Partition hierarchy with RoaringBitmaps**
 
 ```rust
 pub struct PartitionHierarchy {
@@ -95,7 +104,7 @@ pub struct ThresholdTransition {
 }
 ```
 
-**Memory Analysis**
+**Memory analysis**
 
 For 1M records, 100 threshold levels, 100K entities average:
 - RoaringBitmap per entity: ~5 bytes (sparse) to ~125KB (dense)
@@ -103,9 +112,36 @@ For 1M records, 100 threshold levels, 100K entities average:
 - Total hierarchy: 100 × 500KB = 50MB
 - Acceptable tradeoff for computational efficiency
 
-### String Interning Architecture
+**Quantisation and memory warnings**
 
-**Multi-Level Interning Strategy**
+```rust
+impl PartitionHierarchy {
+    pub fn check_memory_usage(&self, num_records: usize) -> MemoryStatus {
+        let num_levels = self.levels.len();
+        let estimated_entries = num_records * num_levels;
+        
+        if estimated_entries > 100_000_000 {
+            MemoryStatus::Warning(format!(
+                "Large hierarchy: {}M entries. Consider quantisation to reduce precision",
+                estimated_entries / 1_000_000
+            ))
+        } else {
+            MemoryStatus::Ok
+        }
+    }
+    
+    pub fn with_quantisation(mut self, decimal_places: usize) -> Self {
+        // Optionally quantise thresholds to reduce unique levels
+        let quantisation_factor = 10_f64.powi(decimal_places as i32);
+        // Implementation merges levels within quantisation bounds
+        self
+    }
+}
+```
+
+### String interning architecture
+
+**Multi-level interning strategy**
 
 ```rust
 use string_interner::{StringInterner, DefaultSymbol};
@@ -140,14 +176,80 @@ impl InternSystem {
 }
 ```
 
-**Compression Results**
+**Compression results**
 - Source names: 20-30 bytes → 2 bytes (93% reduction)
 - References: (String, u32) ~24 bytes → 6 bytes (75% reduction)
 - Total memory: 80-90% reduction for typical workloads
 
-### Lazy Metric Computation Framework
+### Connected components algorithm for hierarchy construction
 
-**LazyMetric Pattern Implementation**
+**Union-find based hierarchy builder**
+
+```rust
+use disjoint_sets::UnionFind;
+
+impl PartitionHierarchy {
+    pub fn from_edges(edges: Vec<(u32, u32, f64)>, num_records: u32) -> Self {
+        // Group edges by similarity value
+        let mut threshold_groups: BTreeMap<OrderedFloat<f64>, Vec<(u32, u32)>> = 
+            BTreeMap::new();
+        
+        for (src, dst, weight) in edges {
+            threshold_groups
+                .entry(OrderedFloat(weight))
+                .or_default()
+                .push((src, dst));
+        }
+        
+        let mut levels = BTreeMap::new();
+        let mut current_partition = (0..num_records)
+            .map(|i| {
+                let mut bitmap = RoaringBitmap::new();
+                bitmap.insert(i);
+                bitmap
+            })
+            .collect::<Vec<_>>();
+        
+        // Process from highest to lowest threshold
+        for (threshold, edges_at_threshold) in threshold_groups.into_iter().rev() {
+            // Union-find handles n-way merges naturally
+            let mut uf = UnionFind::new(num_records as usize);
+            
+            // Apply all edges at this threshold simultaneously
+            for (src, dst) in edges_at_threshold {
+                uf.union(src as usize, dst as usize);
+            }
+            
+            // Extract connected components
+            let partition = uf.to_partition();
+            let entities = partition_to_bitmaps(partition);
+            
+            levels.insert(threshold, PartitionLevel {
+                threshold: threshold.0,
+                entities,
+                entity_sizes: compute_sizes(&entities),
+                internal_edges: vec![],
+                sum_weights: vec![],
+                lazy_metrics: LazyMetricsCache::new(),
+            });
+            
+            current_partition = entities;
+        }
+        
+        PartitionHierarchy {
+            levels,
+            transitions: Vec::new(),  // Built lazily when needed
+            computation_cache: Default::default(),
+        }
+    }
+}
+```
+
+This approach naturally handles n-way merges: when edges (A,B,0.9), (B,C,0.9), and (C,D,0.9) all have the same weight, the union-find merges {A,B,C,D} simultaneously at threshold 0.9.
+
+### Lazy metric computation framework
+
+**LazyMetric pattern implementation**
 
 ```rust
 pub struct LazyMetricsCache {
@@ -187,6 +289,11 @@ impl LazyMetricsCache {
                     ).into()
                 }).get().copied().unwrap()
             },
+            MetricType::BCubed => {
+                // B-cubed is semi-incremental: O(k × avg_entity_size)
+                // Must recalculate for all records in affected entities
+                self.compute_bcubed(threshold, ground_truth)
+            },
             // Similar for other metrics...
         }
     }
@@ -210,7 +317,7 @@ impl LazyMetricsCache {
 }
 ```
 
-**Incremental Computation Chain**
+**Incremental computation chain**
 
 ```rust
 impl PartitionHierarchy {
@@ -243,12 +350,12 @@ impl PartitionHierarchy {
 }
 ```
 
-### Sparse Structure Exploitation
+### Sparse structure exploitation
 
-**Natural Sparsity Patterns**
+**Natural sparsity patterns**
 
 ```rust
-// 1. Sparse Contingency Tables
+// 1. Sparse contingency tables
 pub struct SparseContingencyTable {
     // Most entity pairs have zero overlap
     nonzero_cells: HashMap<(EntityId, EntityId), u32>,
@@ -275,7 +382,7 @@ impl SparseContingencyTable {
     }
 }
 
-// 2. Block Structure for Disconnected Components
+// 2. Block structure for disconnected components
 pub struct BlockedHierarchy {
     blocks: Vec<PartitionHierarchy>,
     block_assignments: Vec<BlockId>,
@@ -288,7 +395,7 @@ pub struct BlockedHierarchy {
     }
 }
 
-// 3. Sparse Similarity Matrix
+// 3. Sparse similarity matrix
 pub struct SparseSimilarityMatrix {
     // Only store non-zero similarities
     edges: Vec<(u32, u32, f64)>,
@@ -298,7 +405,7 @@ pub struct SparseSimilarityMatrix {
 }
 ```
 
-**Exploiting Sparsity**
+**Exploiting sparsity**
 
 ```rust
 impl SparseSimilarityMatrix {
@@ -319,15 +426,15 @@ impl SparseSimilarityMatrix {
 }
 ```
 
-### SIMD and Cache Optimizations
+### SIMD and cache optimisations
 
-**Vectorized Metric Computation**
+**Vectorised metric computation**
 
 ```rust
 use std::simd::{f64x4, u32x8, SimdFloat, SimdUint};
 
 impl PartitionLevel {
-    pub fn compute_sizes_vectorized(&self) -> Vec<u32> {
+    pub fn compute_sizes_vectorised(&self) -> Vec<u32> {
         let mut sizes = Vec::with_capacity(self.entities.len());
         
         // Process 8 entities at once
@@ -348,7 +455,7 @@ impl PartitionLevel {
         sizes
     }
     
-    pub fn compute_f1_scores_vectorized(&self, 
+    pub fn compute_f1_scores_vectorised(&self, 
                                         precisions: &[f64], 
                                         recalls: &[f64]) -> Vec<f64> {
         assert_eq!(precisions.len(), recalls.len());
@@ -371,7 +478,7 @@ impl PartitionLevel {
 }
 ```
 
-**Cache-Optimized Memory Layout**
+**Cache-optimised memory layout**
 
 ```rust
 // Align to cache lines for better performance
@@ -390,7 +497,7 @@ pub struct CacheAlignedPartition {
     _pad2: [u8; 32],  // Prevent false sharing
 }
 
-// Structure of Arrays for better vectorization
+// Structure of Arrays for better vectorisation
 pub struct SoAMetrics {
     precisions: Vec<f64>,
     recalls: Vec<f64>,
@@ -399,9 +506,9 @@ pub struct SoAMetrics {
 }
 ```
 
-### Parallel Processing Architecture
+### Parallel processing architecture
 
-**Rayon-Based Parallel Hierarchy Construction**
+**Rayon-based parallel hierarchy construction**
 
 ```rust
 use rayon::prelude::*;
@@ -437,21 +544,26 @@ impl PartitionHierarchy {
 }
 ```
 
-**Work-Stealing for Multi-Collection Comparison**
+**Work-stealing for multi-collection comparison**
 
 ```rust
 impl EntityFrame {
     pub fn compare_all_collections_parallel(&self, 
                                            truth_id: CollectionId,
-                                           threshold: f64) 
+                                           threshold_truth: f64,
+                                           thresholds: HashMap<CollectionId, f64>) 
         -> HashMap<CollectionId, Metrics> {
-        let truth = &self.collections[&truth_id];
+        let truth_cut = (&self.collections[&truth_id], threshold_truth);
         
-        self.collections
+        thresholds
             .par_iter()
             .filter(|(id, _)| **id != truth_id)
-            .map(|(id, collection)| {
-                let metrics = collection.compare_at_threshold(truth, threshold);
+            .map(|(id, threshold)| {
+                let collection = &self.collections[id];
+                let metrics = self.comparison_engine.compare_cuts(
+                    (collection, *threshold),
+                    truth_cut
+                );
                 (*id, metrics)
             })
             .collect()
@@ -459,9 +571,91 @@ impl EntityFrame {
 }
 ```
 
-### Arrow Integration
+**Note on distributed processing**: The block structure of disconnected components naturally enables local parallelisation. Full distributed processing across machines would require careful handling of cross-partition merges and is deferred to future work.
 
-**Hierarchical Arrow Schema**
+### Dual processing for entity operations
+
+**Built-in operations with parallel Rust execution**
+
+```rust
+pub enum EntityProcessor {
+    // Fast built-in operations run in parallel
+    BuiltIn(BuiltInOp),
+    // Custom Python function - flexible but slower
+    Python(PyObject),
+}
+
+pub enum BuiltInOp {
+    Hash(HashAlgorithm),  // SHA256, MD5, Blake3, etc.
+    Size,                 // Entity cardinality
+    Density,              // Internal connectivity
+    Fingerprint,          // MinHash or similar
+}
+
+impl PartitionLevel {
+    pub fn map_over_entities<T>(&self, 
+                               processor: EntityProcessor) -> HashMap<EntityId, T> 
+    where T: Send + Sync 
+    {
+        match processor {
+            EntityProcessor::BuiltIn(op) => {
+                // Parallel execution with Rayon
+                self.entities
+                    .par_iter()
+                    .enumerate()
+                    .map(|(id, entity)| {
+                        let result = match op {
+                            BuiltInOp::Hash(algo) => compute_hash(entity, algo),
+                            BuiltInOp::Size => entity.cardinality(),
+                            BuiltInOp::Density => compute_density(entity),
+                            BuiltInOp::Fingerprint => compute_fingerprint(entity),
+                        };
+                        (EntityId(id), result)
+                    })
+                    .collect()
+            },
+            EntityProcessor::Python(func) => {
+                // Single-threaded Python execution
+                self.entities
+                    .iter()
+                    .enumerate()
+                    .map(|(id, entity)| {
+                        let result = call_python_func(func, entity);
+                        (EntityId(id), result)
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+```
+
+**High-performance hashing for large-scale deduplication**
+
+```rust
+use blake3::Hasher;
+use rayon::prelude::*;
+
+fn compute_entity_hashes(partition: &PartitionLevel) -> Vec<[u8; 32]> {
+    partition.entities
+        .par_iter()
+        .map(|entity| {
+            let mut hasher = Hasher::new();
+            // Sort for consistent hashing
+            let mut members: Vec<_> = entity.iter().collect();
+            members.sort_unstable();
+            for member in members {
+                hasher.update(&member.to_le_bytes());
+            }
+            *hasher.finalize().as_bytes()
+        })
+        .collect()
+}
+```
+
+### Arrow integration
+
+**Hierarchical Arrow schema**
 
 ```rust
 use arrow::datatypes::{DataType, Field, Schema};
@@ -506,11 +700,11 @@ pub fn create_entityframe_schema() -> Schema {
 }
 ```
 
-## Layer 3: Practical Engineering Design
+## Layer 3: Practical engineering design
 
 ### Core EntityFrame API
 
-**Multi-Collection Management**
+**Multi-collection management**
 
 ```rust
 pub struct EntityFrame {
@@ -534,9 +728,10 @@ impl EntityFrame {
                          name: &str, 
                          hierarchy: PartitionHierarchy) -> CollectionId {
         let id = CollectionId::new(name);
+        // Wrap hierarchy with metadata for implementation purposes
+        // (mathematically, the collection IS the hierarchy)
         let collection = EntityCollection {
             hierarchy,
-            similarity_data: None,
             metadata: CollectionMetadata::new(name),
         };
         self.collections.insert(id, collection);
@@ -550,23 +745,22 @@ impl EntityFrame {
         self.records.add_from_source(source_id, records)
     }
     
-    pub fn compare_at_threshold(&self,
-                               collection_a: CollectionId,
-                               collection_b: CollectionId,
-                               threshold: f64) -> ComparisonResult {
-        let a = &self.collections[&collection_a];
-        let b = &self.collections[&collection_b];
+    pub fn compare_cuts(&self,
+                       cut_a: (&str, f64),
+                       cut_b: (&str, f64)) -> ComparisonResult {
+        let collection_a = &self.collections[&CollectionId::from(cut_a.0)];
+        let collection_b = &self.collections[&CollectionId::from(cut_b.0)];
         self.analyzer.compare_partitions(
-            a.hierarchy.at_threshold(threshold),
-            b.hierarchy.at_threshold(threshold)
+            collection_a.hierarchy.at_threshold(cut_a.1),
+            collection_b.hierarchy.at_threshold(cut_b.1)
         )
     }
 }
 ```
 
-### Python Interface via PyO3
+### Python interface via PyO3
 
-**Core Python Bindings**
+**Core Python bindings**
 
 ```rust
 use pyo3::prelude::*;
@@ -611,17 +805,17 @@ impl PyEntityFrame {
         Ok(ids.len())
     }
     
-    #[pyo3(text_signature = "($self, collection_a, collection_b, threshold)")]
+    #[pyo3(text_signature = "($self, cut_a, cut_b)")]
     pub fn compare(&self, 
-                   collection_a: &str, 
-                   collection_b: &str,
-                   threshold: f64) -> PyResult<PyDict> {
+                   cut_a: PyCollectionCut,
+                   cut_b: PyCollectionCut) -> PyResult<PyDict> {
         let frame = self.inner.lock().unwrap();
-        let result = frame.compare_at_threshold(
-            CollectionId::from(collection_a),
-            CollectionId::from(collection_b),
-            threshold
-        );
+        
+        // Convert Python tuples/strings to cuts
+        let rust_cut_a = cut_a.to_rust()?;
+        let rust_cut_b = cut_b.to_rust()?;
+        
+        let result = frame.compare_cuts(rust_cut_a, rust_cut_b);
         
         // Convert to Python dict
         let py_dict = PyDict::new();
@@ -633,9 +827,29 @@ impl PyEntityFrame {
         Ok(py_dict)
     }
 }
+
+// Helper for Python collection cuts
+enum PyCollectionCut {
+    Hierarchical(String, f64),  // ("splink_v1", 0.85)
+    Deterministic(String),       // "ground_truth"
+}
+
+impl PyCollectionCut {
+    fn from_python(obj: &PyAny) -> PyResult<Self> {
+        if let Ok(name) = obj.extract::<String>() {
+            Ok(PyCollectionCut::Deterministic(name))
+        } else if let Ok((name, threshold)) = obj.extract::<(String, f64)>() {
+            Ok(PyCollectionCut::Hierarchical(name, threshold))
+        } else {
+            Err(PyErr::new::<PyTypeError, _>(
+                "Expected string or (string, float) tuple for collection cut"
+            ))
+        }
+    }
+}
 ```
 
-**Python Usage Examples**
+**Python usage examples**
 
 ```python
 import entityframe as ef
@@ -654,20 +868,34 @@ frame.add_collection("splink_output", splink_hierarchy)
 frame.add_collection("dedupe_output", dedupe_hierarchy)
 frame.add_collection("ground_truth", truth_hierarchy)
 
-# Compare collections at specific threshold
-comparison = frame.compare("splink_output", "ground_truth", 0.85)
+# Compare collections at specific thresholds
+# Note: thresholds are not comparable across methods
+comparison = frame.compare(
+    ("splink_output", 0.85),
+    ("dedupe_output", 0.76)
+)
+print(f"Agreement: F1={comparison['f1']:.3f}")
+
+# Compare against deterministic ground truth
+comparison = frame.compare(
+    ("splink_output", 0.85),
+    "ground_truth"  # No threshold needed for deterministic
+)
 print(f"Splink at 0.85: F1={comparison['f1']:.3f}")
 
 # Sweep thresholds to find optimal
 results = []
 for threshold in np.arange(0.5, 1.0, 0.01):
-    metrics = frame.compare("splink_output", "ground_truth", threshold)
+    metrics = frame.compare(
+        ("splink_output", threshold),
+        "ground_truth"
+    )
     results.append((threshold, metrics['f1']))
 
 optimal = max(results, key=lambda x: x[1])
 print(f"Optimal threshold: {optimal[0]:.2f} (F1={optimal[1]:.3f})")
 
-# Analyze specific entity
+# Analyse specific entity
 entity = frame.get_entity("splink_output", 0.85, entity_id=42)
 for source, record_id in entity.members:
     record = frame.get_record(source, record_id)
@@ -677,9 +905,9 @@ for source, record_id in entity.members:
 frame.to_arrow("entity_analysis.arrow")
 ```
 
-### Incremental Processing
+### Incremental processing
 
-**Streaming Updates**
+**Streaming updates**
 
 ```rust
 pub struct StreamingEntityFrame {
@@ -723,9 +951,9 @@ impl StreamingEntityFrame {
 }
 ```
 
-### Production Deployment
+### Production deployment
 
-**Monitoring and Observability**
+**Monitoring and observability**
 
 ```rust
 #[derive(Serialize, Deserialize)]
@@ -759,39 +987,6 @@ impl EntityFrame {
             avg_entity_stability: self.compute_avg_stability(),
             threshold_sensitivity: self.compute_sensitivity(),
         }
-    }
-}
-```
-
-**Distributed Processing Support**
-
-```rust
-pub struct DistributedEntityFrame {
-    coordinator: Arc<CoordinatorNode>,
-    workers: Vec<WorkerNode>,
-    partitioner: RecordPartitioner,
-}
-
-impl DistributedEntityFrame {
-    pub async fn build_collection_distributed(&self, 
-                                             similarities: DistributedSimilarityMatrix) 
-        -> PartitionHierarchy {
-        // Phase 1: Partition records across workers
-        let partitions = self.partitioner.partition_records(&similarities);
-        
-        // Phase 2: Build local hierarchies in parallel
-        let local_hierarchies = futures::future::join_all(
-            self.workers.iter().zip(partitions.iter()).map(|(worker, partition)| {
-                worker.build_local_hierarchy(partition)
-            })
-        ).await;
-        
-        // Phase 3: Merge cross-partition edges
-        let global_hierarchy = self.coordinator
-            .merge_hierarchies(local_hierarchies)
-            .await;
-        
-        global_hierarchy
     }
 }
 ```

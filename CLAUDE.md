@@ -82,6 +82,20 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 
 Use `just test` for regular development to get fast feedback. Use `just test scale` when validating performance at target scale.
 
+There is a house style for parameterising Python unit tests.
+
+```python
+@pytest.mark.parametrize(
+    ["foo", "bar"],
+    [
+        pytest.param(True, 12, id="test_thing"),
+        pytest.param(False, 16, id="test_other_thing"),
+    ],
+)
+def test_something(foo: bool, bar: int):
+    """Tests that something does something."""
+```
+
 ## Development workflow
 
 1. Install dependencies: `just install`
