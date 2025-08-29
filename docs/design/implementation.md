@@ -1,17 +1,16 @@
-# EntityFrame Design Document B: Technical implementation
+# EntityFrame Design Document B: Technical Implementation
 
-## Layer 2: Computer science techniques
+## Layer 2: Computer Science Techniques
 
-### Core data structure architecture
+### Core Data Structure Architecture
 
 **Multi-collection EntityFrame structure**
 
 ```rust
 pub struct EntityFrame {
     // Multiple hierarchies (collections) sharing same record space
-    // Note: We use HashMap<CollectionId, EntityCollection> for implementation,
-    // but mathematically this represents {H₁, H₂, ..., Hₙ}
-    collections: HashMap<CollectionId, EntityCollection>,
+    // Collections ARE hierarchies mathematically
+    collections: HashMap<CollectionId, PartitionHierarchy>,
     
     // Shared interned record storage
     records: InternedRecordStorage,
@@ -21,16 +20,6 @@ pub struct EntityFrame {
     
     // Global string interning for sources
     source_interner: StringInterner,
-}
-
-pub struct EntityCollection {
-    // The hierarchical partition structure
-    // Note: Mathematically, the collection IS the hierarchy.
-    // This struct wraps it with metadata for implementation purposes.
-    hierarchy: PartitionHierarchy,
-    
-    // Collection metadata
-    metadata: CollectionMetadata,
 }
 
 pub struct InternedRecordStorage {
@@ -59,20 +48,39 @@ pub enum LocalId {
 }
 ```
 
-### Efficient hierarchical data structures
+### Efficient Hierarchical Data Structures
 
-**Partition hierarchy with RoaringBitmaps**
+**Merge-event based hierarchy with smart caching**
 
 ```rust
 pub struct PartitionHierarchy {
-    // Partition at each threshold where merges occur
-    levels: BTreeMap<OrderedFloat<f64>, PartitionLevel>,
+    // Primary: Merge events sorted by threshold (descending)
+    merges: Vec<MergeEvent>,
     
-    // Transition information between levels
-    transitions: Vec<ThresholdTransition>,
+    // Secondary: Cache for frequently accessed partitions (per collection)
+    partition_cache: LruCache<OrderedFloat<f64>, PartitionLevel>,
     
-    // Cache for frequently accessed computations
-    computation_cache: ComputationCache,
+    // Tertiary: State for incremental metric computation
+    metric_state: Option<IncrementalMetricState>,
+    
+    // Index for binary search on thresholds
+    threshold_index: BTreeMap<OrderedFloat<f64>, usize>,
+    
+    // Configuration
+    cache_size: usize,
+}
+
+pub struct MergeEvent {
+    threshold: f64,
+    
+    // Components merging at this threshold (supports n-way)
+    merging_components: Vec<ComponentId>,
+    
+    // The new component formed
+    result_component: ComponentId,
+    
+    // Records involved for incremental updates
+    affected_records: RoaringBitmap,
 }
 
 pub struct PartitionLevel {
@@ -83,63 +91,28 @@ pub struct PartitionLevel {
     
     // Pre-computed cheap statistics
     entity_sizes: Vec<u32>,
-    internal_edges: Vec<u32>,
-    sum_weights: Vec<f64>,
     
     // Lazy expensive metrics
     lazy_metrics: LazyMetricsCache,
 }
 
-pub struct ThresholdTransition {
-    from_threshold: f64,
-    to_threshold: f64,
-    
-    // N-way merge support
-    merging_groups: Vec<Vec<EntityId>>,
-    
-    // For incremental computation
-    added_edges: u32,
-    removed_edges: u32,
-    affected_records: RoaringBitmap,
+pub struct IncrementalMetricState {
+    last_threshold: f64,
+    last_partition: PartitionLevel,
+    contingency_table: SparseContingencyTable,
+    affected_entities: RoaringBitmap,
 }
 ```
 
 **Memory analysis**
 
-For 1M records, 100 threshold levels, 100K entities average:
-- RoaringBitmap per entity: ~5 bytes (sparse) to ~125KB (dense)
-- Per level: 100K × 5 bytes = 500KB typical
-- Total hierarchy: 100 × 500KB = 50MB
-- Acceptable tradeoff for computational efficiency
+For 1M records with 1M edges:
+- Merge events: 1M × 50-100 bytes = 50-100MB (includes RoaringBitmaps)
+- LRU cache (10 partitions): 10 × 500KB = 5MB
+- Total: ~50-250MB vs ~10GB for full materialization
+- Tradeoff: O(m) reconstruction cost for uncached queries
 
-**Quantisation and memory warnings**
-
-```rust
-impl PartitionHierarchy {
-    pub fn check_memory_usage(&self, num_records: usize) -> MemoryStatus {
-        let num_levels = self.levels.len();
-        let estimated_entries = num_records * num_levels;
-        
-        if estimated_entries > 100_000_000 {
-            MemoryStatus::Warning(format!(
-                "Large hierarchy: {}M entries. Consider quantisation to reduce precision",
-                estimated_entries / 1_000_000
-            ))
-        } else {
-            MemoryStatus::Ok
-        }
-    }
-    
-    pub fn with_quantisation(mut self, decimal_places: usize) -> Self {
-        // Optionally quantise thresholds to reduce unique levels
-        let quantisation_factor = 10_f64.powi(decimal_places as i32);
-        // Implementation merges levels within quantisation bounds
-        self
-    }
-}
-```
-
-### String interning architecture
+### String Interning Architecture
 
 **Multi-level interning strategy**
 
@@ -181,73 +154,206 @@ impl InternSystem {
 - References: (String, u32) ~24 bytes → 6 bytes (75% reduction)
 - Total memory: 80-90% reduction for typical workloads
 
-### Connected components algorithm for hierarchy construction
+### Connected Components Algorithm for Hierarchy Construction
 
-**Union-find based hierarchy builder**
+**Union-find based merge event extraction**
 
 ```rust
 use disjoint_sets::UnionFind;
 
 impl PartitionHierarchy {
-    pub fn from_edges(edges: Vec<(u32, u32, f64)>, num_records: u32) -> Self {
-        // Group edges by similarity value
-        let mut threshold_groups: BTreeMap<OrderedFloat<f64>, Vec<(u32, u32)>> = 
-            BTreeMap::new();
+    pub fn from_edges(edges: Vec<(u32, u32, f64)>, num_records: u32, cache_size: usize) -> Self {
+        // Sort edges by weight (descending) - O(m log m)
+        let mut sorted_edges = edges;
+        sorted_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
         
-        for (src, dst, weight) in edges {
-            threshold_groups
-                .entry(OrderedFloat(weight))
-                .or_default()
-                .push((src, dst));
+        // Group edges by threshold
+        let mut threshold_groups: Vec<(f64, Vec<(u32, u32)>)> = Vec::new();
+        let mut current_threshold = sorted_edges[0].2;
+        let mut current_group = Vec::new();
+        
+        for (src, dst, weight) in sorted_edges {
+            if (weight - current_threshold).abs() < f64::EPSILON {
+                current_group.push((src, dst));
+            } else {
+                threshold_groups.push((current_threshold, current_group));
+                current_threshold = weight;
+                current_group = vec![(src, dst)];
+            }
+        }
+        if !current_group.is_empty() {
+            threshold_groups.push((current_threshold, current_group));
         }
         
-        let mut levels = BTreeMap::new();
-        let mut current_partition = (0..num_records)
-            .map(|i| {
-                let mut bitmap = RoaringBitmap::new();
-                bitmap.insert(i);
-                bitmap
-            })
-            .collect::<Vec<_>>();
+        // Build merge events with proper component tracking
+        let mut merges = Vec::new();
+        let mut uf = UnionFind::new(num_records as usize);
+        let mut component_map: HashMap<usize, ComponentId> = HashMap::new();
+        let mut next_component_id = 0;
         
-        // Process from highest to lowest threshold
-        for (threshold, edges_at_threshold) in threshold_groups.into_iter().rev() {
-            // Union-find handles n-way merges naturally
-            let mut uf = UnionFind::new(num_records as usize);
+        // Initialize each record as its own component
+        for i in 0..num_records {
+            component_map.insert(i as usize, ComponentId(i));
+        }
+        
+        for (threshold, edges_at_threshold) in threshold_groups {
+            // Track which components are merging
+            let mut merging_groups: HashMap<usize, HashSet<usize>> = HashMap::new();
             
-            // Apply all edges at this threshold simultaneously
-            for (src, dst) in edges_at_threshold {
-                uf.union(src as usize, dst as usize);
+            for (src, dst) in &edges_at_threshold {
+                let root_src = uf.find(*src as usize);
+                let root_dst = uf.find(*dst as usize);
+                
+                if root_src != root_dst {
+                    merging_groups.entry(root_src).or_default().insert(root_dst);
+                    merging_groups.entry(root_dst).or_default().insert(root_src);
+                }
             }
             
-            // Extract connected components
-            let partition = uf.to_partition();
-            let entities = partition_to_bitmaps(partition);
+            // Apply merges
+            for (src, dst) in &edges_at_threshold {
+                uf.union(*src as usize, *dst as usize);
+            }
             
-            levels.insert(threshold, PartitionLevel {
-                threshold: threshold.0,
-                entities,
-                entity_sizes: compute_sizes(&entities),
-                internal_edges: vec![],
-                sum_weights: vec![],
-                lazy_metrics: LazyMetricsCache::new(),
-            });
-            
-            current_partition = entities;
+            // Create merge events
+            let mut processed = HashSet::new();
+            for root in merging_groups.keys() {
+                if processed.contains(root) {
+                    continue;
+                }
+                
+                // Find all components in this connected merge group
+                let mut to_visit = vec![*root];
+                let mut merge_group = Vec::new();
+                let mut affected = RoaringBitmap::new();
+                
+                while let Some(current) = to_visit.pop() {
+                    if !processed.insert(current) {
+                        continue;
+                    }
+                    
+                    merge_group.push(component_map[&current]);
+                    
+                    // Add all records in this component to affected set
+                    for i in 0..num_records {
+                        if uf.find(i as usize) == current {
+                            affected.insert(i);
+                        }
+                    }
+                    
+                    if let Some(neighbors) = merging_groups.get(&current) {
+                        to_visit.extend(neighbors.iter().cloned());
+                    }
+                }
+                
+                if merge_group.len() > 1 {
+                    let result_id = ComponentId(next_component_id);
+                    next_component_id += 1;
+                    
+                    // Update component map for merged roots
+                    let new_root = uf.find(*root);
+                    component_map.insert(new_root, result_id);
+                    
+                    merges.push(MergeEvent {
+                        threshold,
+                        merging_components: merge_group,
+                        result_component: result_id,
+                        affected_records: affected,
+                    });
+                }
+            }
         }
         
         PartitionHierarchy {
-            levels,
-            transitions: Vec::new(),  // Built lazily when needed
-            computation_cache: Default::default(),
+            merges,
+            partition_cache: LruCache::new(cache_size),
+            metric_state: None,
+            threshold_index: Self::build_threshold_index(&merges),
+            cache_size,
+        }
+    }
+    
+    fn build_threshold_index(merges: &[MergeEvent]) -> BTreeMap<OrderedFloat<f64>, usize> {
+        merges.iter()
+            .enumerate()
+            .map(|(idx, merge)| (OrderedFloat(merge.threshold), idx))
+            .collect()
+    }
+}
+```
+
+### Partition Reconstruction from Merge Events
+
+**Efficient reconstruction algorithm**
+
+```rust
+impl PartitionHierarchy {
+    pub fn at_threshold(&mut self, threshold: f64) -> Result<&PartitionLevel, HierarchyError> {
+        // Validate threshold
+        if threshold < 0.0 || threshold > 1.0 {
+            return Err(HierarchyError::InvalidThreshold(threshold));
+        }
+        
+        let key = OrderedFloat(threshold);
+        
+        // Check cache first
+        if self.partition_cache.contains(&key) {
+            return Ok(self.partition_cache.get(&key).unwrap());
+        }
+        
+        // Check if cache is full and warn
+        if self.partition_cache.len() >= self.cache_size {
+            log::debug!("Cache full, evicting LRU partition");
+        }
+        
+        // Reconstruct from merge events
+        let partition = self.reconstruct_at_threshold(threshold)?;
+        self.partition_cache.put(key, partition);
+        Ok(self.partition_cache.get(&key).unwrap())
+    }
+    
+    fn reconstruct_at_threshold(&self, threshold: f64) -> PartitionLevel {
+        // Start with all singletons
+        let mut uf = UnionFind::new(self.num_records());
+        
+        // Apply all merges with threshold >= t
+        for merge in &self.merges {
+            if merge.threshold >= threshold {
+                // Apply this merge
+                for window in merge.merging_components.windows(2) {
+                    if let [comp_a, comp_b] = window {
+                        // In practice, we'd map components back to records
+                        // This is simplified for clarity
+                        uf.union(comp_a.0, comp_b.0);
+                    }
+                }
+            } else {
+                // Merges are sorted, so we can stop
+                break;
+            }
+        }
+        
+        // Convert union-find to partition
+        let mut entities: HashMap<usize, RoaringBitmap> = HashMap::new();
+        for record in 0..self.num_records() {
+            let root = uf.find(record);
+            entities.entry(root).or_default().insert(record as u32);
+        }
+        
+        let entities: Vec<RoaringBitmap> = entities.into_values().collect();
+        let entity_sizes = entities.iter().map(|e| e.cardinality()).collect();
+        
+        PartitionLevel {
+            threshold,
+            entities,
+            entity_sizes,
+            lazy_metrics: LazyMetricsCache::new(),
         }
     }
 }
 ```
 
-This approach naturally handles n-way merges: when edges (A,B,0.9), (B,C,0.9), and (C,D,0.9) all have the same weight, the union-find merges {A,B,C,D} simultaneously at threshold 0.9.
-
-### Lazy metric computation framework
+### Lazy Metric Computation Framework
 
 **LazyMetric pattern implementation**
 
@@ -291,7 +397,7 @@ impl LazyMetricsCache {
             },
             MetricType::BCubed => {
                 // B-cubed is semi-incremental: O(k × avg_entity_size)
-                // Must recalculate for all records in affected entities
+                // where k = affected entities
                 self.compute_bcubed(threshold, ground_truth)
             },
             // Similar for other metrics...
@@ -304,7 +410,7 @@ impl LazyMetricsCache {
                                 truth: &PartitionLevel) -> f64 {
         // Find nearest computed threshold
         if let Some((prev_t, prev_val)) = self.find_nearest_computed(metric, threshold) {
-            // Incremental update - O(changes) instead of O(n²)
+            // Incremental update - O(k) where k = affected entities
             let delta = self.compute_delta(metric, prev_t, threshold, truth);
             self.computation_stats.incremental_computations += 1;
             prev_val + delta
@@ -328,21 +434,31 @@ impl PartitionHierarchy {
                                 truth: &Self) -> Vec<(f64, Metrics)> {
         let mut results = Vec::new();
         let mut current_metrics = None;
+        let mut current_partition = None;
         
         for threshold in (0..)
             .map(|i| start + i as f64 * step)
             .take_while(|&t| t <= end) {
             
+            // Get partition (from cache or reconstruct)
+            let partition = self.at_threshold(threshold);
+            
             let metrics = if let Some(prev) = current_metrics {
-                // Update from previous - extremely fast
-                self.update_metrics_incremental(prev, threshold, truth)
+                // Update from previous - O(k) where k = affected entities
+                self.update_metrics_incremental(
+                    prev, 
+                    &current_partition.unwrap(),
+                    partition,
+                    truth
+                )
             } else {
                 // Only compute from scratch once
-                self.compute_metrics_full(threshold, truth)
+                self.compute_metrics_full(partition, truth)
             };
             
             results.push((threshold, metrics.clone()));
             current_metrics = Some(metrics);
+            current_partition = Some(partition.clone());
         }
         
         results
@@ -350,7 +466,7 @@ impl PartitionHierarchy {
 }
 ```
 
-### Sparse structure exploitation
+### Sparse Structure Exploitation
 
 **Natural sparsity patterns**
 
@@ -366,8 +482,8 @@ pub struct SparseContingencyTable {
 
 impl SparseContingencyTable {
     pub fn update_incremental(&mut self, merge: &MergeEvent) {
-        // Only update cells affected by merge
-        for entity_id in &merge.merging_entities {
+        // Only update cells affected by merge - O(k)
+        for entity_id in &merge.merging_components {
             // Update only non-zero cells involving this entity
             let affected_cells = self.nonzero_cells
                 .keys()
@@ -395,9 +511,9 @@ pub struct BlockedHierarchy {
     }
 }
 
-// 3. Sparse similarity matrix
-pub struct SparseSimilarityMatrix {
-    // Only store non-zero similarities
+// 3. Sparse edge representation
+pub struct SparseEdgeList {
+    // Only store actual edges, not full matrix
     edges: Vec<(u32, u32, f64)>,
     
     // For efficient lookup
@@ -405,28 +521,7 @@ pub struct SparseSimilarityMatrix {
 }
 ```
 
-**Exploiting sparsity**
-
-```rust
-impl SparseSimilarityMatrix {
-    pub fn find_merges_at_threshold(&self, threshold: f64) -> Vec<MergeEvent> {
-        // Only examine edges above threshold - typically sparse
-        let active_edges = self.edges
-            .iter()
-            .filter(|(_, _, w)| *w >= threshold);
-        
-        // Union-find on sparse graph
-        let mut uf = UnionFind::new(self.num_nodes());
-        for (u, v, _) in active_edges {
-            uf.union(*u, *v);
-        }
-        
-        uf.extract_components()
-    }
-}
-```
-
-### SIMD and cache optimisations
+### SIMD and Cache Optimisations
 
 **Vectorised metric computation**
 
@@ -506,39 +601,35 @@ pub struct SoAMetrics {
 }
 ```
 
-### Parallel processing architecture
+### Parallel Processing Architecture
 
-**Rayon-based parallel hierarchy construction**
+**Rayon-based parallel merge event processing**
 
 ```rust
 use rayon::prelude::*;
 
 impl PartitionHierarchy {
     pub fn build_parallel(edges: Vec<WeightedEdge>) -> Self {
-        // Group edges by threshold
-        let mut threshold_groups: HashMap<OrderedFloat<f64>, Vec<(u32, u32)>> = 
-            HashMap::new();
+        // Sort edges in parallel
+        let mut edges = edges;
+        edges.par_sort_unstable_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap());
         
-        for edge in edges {
-            threshold_groups
-                .entry(OrderedFloat(edge.weight))
-                .or_default()
-                .push((edge.src, edge.dst));
-        }
+        // Group by threshold
+        let threshold_groups = Self::group_by_threshold(edges);
         
-        // Process each threshold level in parallel
-        let levels: Vec<(OrderedFloat<f64>, PartitionLevel)> = threshold_groups
-            .into_par_iter()
-            .map(|(threshold, edges)| {
-                let partition = Self::build_partition_level(edges);
-                (threshold, partition)
+        // Process each threshold's merges in parallel where possible
+        let merges: Vec<MergeEvent> = threshold_groups
+            .into_iter()
+            .flat_map(|(threshold, edges)| {
+                Self::find_merges_at_threshold(threshold, edges)
             })
             .collect();
         
         PartitionHierarchy {
-            levels: levels.into_iter().collect(),
-            transitions: Vec::new(),  // Built after
-            computation_cache: Default::default(),
+            merges,
+            partition_cache: LruCache::new(10),
+            metric_state: None,
+            threshold_index: Self::build_threshold_index(&merges),
         }
     }
 }
@@ -553,16 +644,18 @@ impl EntityFrame {
                                            threshold_truth: f64,
                                            thresholds: HashMap<CollectionId, f64>) 
         -> HashMap<CollectionId, Metrics> {
-        let truth_cut = (&self.collections[&truth_id], threshold_truth);
+        let truth = &self.collections[&truth_id];
+        let truth_partition = truth.at_threshold(threshold_truth);
         
         thresholds
             .par_iter()
             .filter(|(id, _)| **id != truth_id)
             .map(|(id, threshold)| {
                 let collection = &self.collections[id];
-                let metrics = self.comparison_engine.compare_cuts(
-                    (collection, *threshold),
-                    truth_cut
+                let partition = collection.at_threshold(*threshold);
+                let metrics = self.comparison_engine.compare_partitions(
+                    partition,
+                    truth_partition
                 );
                 (*id, metrics)
             })
@@ -571,9 +664,7 @@ impl EntityFrame {
 }
 ```
 
-**Note on distributed processing**: The block structure of disconnected components naturally enables local parallelisation. Full distributed processing across machines would require careful handling of cross-partition merges and is deferred to future work.
-
-### Dual processing for entity operations
+### Dual Processing for Entity Operations
 
 **Built-in operations with parallel Rust execution**
 
@@ -653,7 +744,7 @@ fn compute_entity_hashes(partition: &PartitionLevel) -> Vec<[u8; 32]> {
 }
 ```
 
-### Arrow integration
+### Arrow Integration
 
 **Hierarchical Arrow schema**
 
@@ -664,7 +755,6 @@ pub fn create_entityframe_schema() -> Schema {
     Schema::new(vec![
         // Collection metadata
         Field::new("collection_id", DataType::Utf8, false),
-        Field::new("collection_type", DataType::Utf8, false),
         
         // Interned references
         Field::new("source_dictionary", DataType::Dictionary(
@@ -672,35 +762,32 @@ pub fn create_entityframe_schema() -> Schema {
             Box::new(DataType::Utf8),
         ), false),
         
-        // Partition levels
-        Field::new("partitions", DataType::List(Box::new(Field::new(
-            "partition", 
+        // Merge events (not full partitions)
+        Field::new("merge_events", DataType::List(Box::new(Field::new(
+            "merge", 
             DataType::Struct(vec![
                 Field::new("threshold", DataType::Float64, false),
-                Field::new("num_entities", DataType::UInt32, false),
-                Field::new("entities", DataType::List(
-                    Box::new(Field::new("entity", DataType::List(
-                        Box::new(Field::new("record_id", DataType::UInt32, false))
-                    ), false))
+                Field::new("merging_components", DataType::List(
+                    Box::new(DataType::UInt32)
                 ), false),
+                Field::new("result_component", DataType::UInt32, false),
             ]), 
             false
         ))), false),
         
         // Statistics
         Field::new("statistics", DataType::Struct(vec![
-            Field::new("entity_sizes", DataType::List(
-                Box::new(DataType::UInt32)
-            ), false),
-            Field::new("internal_edges", DataType::List(
-                Box::new(DataType::UInt32)
-            ), false),
+            Field::new("num_merges", DataType::UInt32, false),
+            Field::new("threshold_range", DataType::Struct(vec![
+                Field::new("min", DataType::Float64, false),
+                Field::new("max", DataType::Float64, false),
+            ]), false),
         ]), true),
     ])
 }
 ```
 
-## Layer 3: Practical engineering design
+## Layer 3: Practical Engineering Design
 
 ### Core EntityFrame API
 
@@ -708,7 +795,7 @@ pub fn create_entityframe_schema() -> Schema {
 
 ```rust
 pub struct EntityFrame {
-    collections: HashMap<CollectionId, EntityCollection>,
+    collections: HashMap<CollectionId, PartitionHierarchy>,
     records: InternedRecordStorage,
     interner: InternSystem,
     analyzer: FrameAnalyzer,
@@ -728,13 +815,7 @@ impl EntityFrame {
                          name: &str, 
                          hierarchy: PartitionHierarchy) -> CollectionId {
         let id = CollectionId::new(name);
-        // Wrap hierarchy with metadata for implementation purposes
-        // (mathematically, the collection IS the hierarchy)
-        let collection = EntityCollection {
-            hierarchy,
-            metadata: CollectionMetadata::new(name),
-        };
-        self.collections.insert(id, collection);
+        self.collections.insert(id, hierarchy);
         id
     }
     
@@ -745,20 +826,22 @@ impl EntityFrame {
         self.records.add_from_source(source_id, records)
     }
     
-    pub fn compare_cuts(&self,
+    pub fn compare_cuts(&mut self,
                        cut_a: (&str, f64),
                        cut_b: (&str, f64)) -> ComparisonResult {
-        let collection_a = &self.collections[&CollectionId::from(cut_a.0)];
-        let collection_b = &self.collections[&CollectionId::from(cut_b.0)];
-        self.analyzer.compare_partitions(
-            collection_a.hierarchy.at_threshold(cut_a.1),
-            collection_b.hierarchy.at_threshold(cut_b.1)
-        )
+        let collection_a = &mut self.collections.get_mut(&CollectionId::from(cut_a.0)).unwrap();
+        let collection_b = &mut self.collections.get_mut(&CollectionId::from(cut_b.0)).unwrap();
+        
+        // Partitions may be cached or reconstructed
+        let partition_a = collection_a.at_threshold(cut_a.1);
+        let partition_b = collection_b.at_threshold(cut_b.1);
+        
+        self.analyzer.compare_partitions(partition_a, partition_b)
     }
 }
 ```
 
-### Python interface via PyO3
+### Python Interface via PyO3
 
 **Core Python bindings**
 
@@ -783,7 +866,7 @@ impl PyEntityFrame {
                          name: &str, 
                          py_hierarchy: PyObject) -> PyResult<String> {
         let hierarchy = PartitionHierarchy::from_pyobject(py_hierarchy)?;
-        let frame = self.inner.lock().unwrap();
+        let mut frame = self.inner.lock().unwrap();
         let id = frame.add_collection(name, hierarchy);
         Ok(id.to_string())
     }
@@ -806,12 +889,12 @@ impl PyEntityFrame {
     }
     
     #[pyo3(text_signature = "($self, cut_a, cut_b)")]
-    pub fn compare(&self, 
+    pub fn compare(&mut self, 
                    cut_a: PyCollectionCut,
                    cut_b: PyCollectionCut) -> PyResult<PyDict> {
-        let frame = self.inner.lock().unwrap();
+        let mut frame = self.inner.lock().unwrap();
         
-        // Convert Python tuples/strings to cuts
+        // All cuts are now (name, threshold) tuples
         let rust_cut_a = cut_a.to_rust()?;
         let rust_cut_b = cut_b.to_rust()?;
         
@@ -828,23 +911,20 @@ impl PyEntityFrame {
     }
 }
 
-// Helper for Python collection cuts
-enum PyCollectionCut {
-    Hierarchical(String, f64),  // ("splink_v1", 0.85)
-    Deterministic(String),       // "ground_truth"
+// All collections now use (name, threshold) format
+struct PyCollectionCut {
+    name: String,
+    threshold: f64,
 }
 
 impl PyCollectionCut {
     fn from_python(obj: &PyAny) -> PyResult<Self> {
-        if let Ok(name) = obj.extract::<String>() {
-            Ok(PyCollectionCut::Deterministic(name))
-        } else if let Ok((name, threshold)) = obj.extract::<(String, f64)>() {
-            Ok(PyCollectionCut::Hierarchical(name, threshold))
-        } else {
-            Err(PyErr::new::<PyTypeError, _>(
-                "Expected string or (string, float) tuple for collection cut"
-            ))
-        }
+        let (name, threshold) = obj.extract::<(String, f64)>()?;
+        Ok(PyCollectionCut { name, threshold })
+    }
+    
+    fn to_rust(&self) -> PyResult<(&str, f64)> {
+        Ok((&self.name, self.threshold))
     }
 }
 ```
@@ -863,23 +943,23 @@ frame.load_records("CRM", pd.read_csv("crm_customers.csv"))
 frame.load_records("MailingList", pd.read_csv("mailing_list.csv"))
 frame.load_records("OrderSystem", pd.read_parquet("orders.parquet"))
 
-# Add different resolution attempts as collections
+# Add different resolution attempts as collections (all hierarchies)
 frame.add_collection("splink_output", splink_hierarchy)
 frame.add_collection("dedupe_output", dedupe_hierarchy)
-frame.add_collection("ground_truth", truth_hierarchy)
+frame.add_collection("ground_truth", truth_hierarchy)  # Even "fixed" data is at threshold 1.0
 
 # Compare collections at specific thresholds
-# Note: thresholds are not comparable across methods
+# Note: ALL comparisons now use (collection, threshold) format
 comparison = frame.compare(
     ("splink_output", 0.85),
     ("dedupe_output", 0.76)
 )
 print(f"Agreement: F1={comparison['f1']:.3f}")
 
-# Compare against deterministic ground truth
+# Compare against "fixed" ground truth (at threshold 1.0)
 comparison = frame.compare(
     ("splink_output", 0.85),
-    "ground_truth"  # No threshold needed for deterministic
+    ("ground_truth", 1.0)  # Explicit threshold for all collections
 )
 print(f"Splink at 0.85: F1={comparison['f1']:.3f}")
 
@@ -888,7 +968,7 @@ results = []
 for threshold in np.arange(0.5, 1.0, 0.01):
     metrics = frame.compare(
         ("splink_output", threshold),
-        "ground_truth"
+        ("ground_truth", 1.0)
     )
     results.append((threshold, metrics['f1']))
 
@@ -905,53 +985,56 @@ for source, record_id in entity.members:
 frame.to_arrow("entity_analysis.arrow")
 ```
 
-### Incremental processing
+### Batch Processing Optimisations
 
-**Streaming updates**
+**Optimised batch construction**
 
 ```rust
-pub struct StreamingEntityFrame {
-    base_frame: EntityFrame,
-    update_buffer: RingBuffer<RecordUpdate>,
+pub struct BatchProcessor {
+    frame: EntityFrame,
     batch_size: usize,
 }
 
-impl StreamingEntityFrame {
-    pub async fn process_stream<S>(&mut self, mut stream: S) 
-    where S: Stream<Item = RecordUpdate> + Unpin
-    {
-        while let Some(update) = stream.next().await {
-            self.update_buffer.push(update);
-            
-            if self.update_buffer.len() >= self.batch_size {
-                self.flush_updates().await;
-            }
-        }
+impl BatchProcessor {
+    pub fn process_large_dataset(&mut self, 
+                                 edges: impl Iterator<Item = WeightedEdge>) {
+        // Process in memory-efficient batches
+        let chunks = edges.chunks(self.batch_size);
         
-        // Final flush
-        if !self.update_buffer.is_empty() {
-            self.flush_updates().await;
+        for chunk in chunks {
+            let hierarchy = PartitionHierarchy::from_edges(chunk.collect(), self.num_records);
+            // Process hierarchy...
         }
     }
     
-    async fn flush_updates(&mut self) {
-        let updates: Vec<_> = self.update_buffer.drain().collect();
+    pub fn parallel_batch_comparison(&self,
+                                    collections: Vec<CollectionId>,
+                                    thresholds: Vec<f64>) -> ComparisonMatrix {
+        use rayon::prelude::*;
         
-        // Add new records
-        let new_records = updates.iter()
-            .filter_map(|u| u.as_new_record())
-            .collect::<Vec<_>>();
-        self.base_frame.records.add_batch(new_records);
+        // Parallel comparison across collections and thresholds
+        let comparisons: Vec<_> = collections
+            .par_iter()
+            .flat_map(|col_a| {
+                thresholds.par_iter().flat_map(move |t_a| {
+                    collections.par_iter().flat_map(move |col_b| {
+                        thresholds.par_iter().map(move |t_b| {
+                            self.frame.compare_cuts(
+                                (col_a, *t_a),
+                                (col_b, *t_b)
+                            )
+                        })
+                    })
+                })
+            })
+            .collect();
         
-        // Update hierarchies incrementally
-        for collection in self.base_frame.collections.values_mut() {
-            collection.hierarchy.update_incremental(&updates);
-        }
+        ComparisonMatrix::from_comparisons(comparisons)
     }
 }
 ```
 
-### Production deployment
+### Production Deployment
 
 **Monitoring and observability**
 
@@ -965,7 +1048,7 @@ pub struct FrameMetrics {
     total_memory_mb: f64,
     
     // Performance metrics
-    avg_comparison_time_ms: f64,
+    avg_reconstruction_time_ms: f64,
     cache_hit_rate: f64,
     incremental_computation_rate: f64,
     
@@ -976,16 +1059,83 @@ pub struct FrameMetrics {
 
 impl EntityFrame {
     pub fn collect_metrics(&self) -> FrameMetrics {
+        let total_merges: usize = self.collections
+            .values()
+            .map(|h| h.merges.len())
+            .sum();
+        
+        let cache_stats = self.get_cache_statistics();
+        
         FrameMetrics {
             num_collections: self.collections.len(),
             num_records: self.records.len(),
             num_sources: self.interner.num_sources(),
             total_memory_mb: self.estimate_memory_usage() / 1_048_576.0,
-            avg_comparison_time_ms: self.analyzer.avg_comparison_time(),
-            cache_hit_rate: self.compute_cache_hit_rate(),
+            avg_reconstruction_time_ms: cache_stats.avg_miss_time_ms,
+            cache_hit_rate: cache_stats.hit_rate,
             incremental_computation_rate: self.compute_incremental_rate(),
             avg_entity_stability: self.compute_avg_stability(),
             threshold_sensitivity: self.compute_sensitivity(),
+        }
+    }
+    
+    fn estimate_memory_usage(&self) -> f64 {
+        let merge_memory: usize = self.collections
+            .values()
+            .map(|h| h.merges.len() * std::mem::size_of::<MergeEvent>())
+            .sum();
+        
+        let cache_memory: usize = self.collections
+            .values()
+            .map(|h| h.partition_cache.len() * 500_000) // ~500KB per cached partition
+            .sum();
+        
+        (merge_memory + cache_memory) as f64
+    }
+}
+```
+
+**Performance characteristics**
+
+```rust
+/// Expected performance for different scales
+/// Based on merge event representation with LRU caching
+pub struct PerformanceProfile {
+    pub scale: DataScale,
+    pub hierarchy_build_time: Duration,
+    pub cached_query_time: Duration,
+    pub uncached_query_time: Duration,
+    pub sweep_time_per_threshold: Duration,
+    pub memory_usage: ByteSize,
+}
+
+impl PerformanceProfile {
+    pub fn estimate(num_records: usize, num_edges: usize) -> Self {
+        match (num_records, num_edges) {
+            (n, m) if n <= 10_000 => PerformanceProfile {
+                scale: DataScale::Small,
+                hierarchy_build_time: Duration::from_millis(100),
+                cached_query_time: Duration::from_micros(100),
+                uncached_query_time: Duration::from_millis(10),
+                sweep_time_per_threshold: Duration::from_millis(1),
+                memory_usage: ByteSize::mb(10),
+            },
+            (n, m) if n <= 1_000_000 => PerformanceProfile {
+                scale: DataScale::Medium,
+                hierarchy_build_time: Duration::from_secs(10),
+                cached_query_time: Duration::from_millis(1),
+                uncached_query_time: Duration::from_millis(200),
+                sweep_time_per_threshold: Duration::from_millis(10),
+                memory_usage: ByteSize::mb(100),
+            },
+            _ => PerformanceProfile {
+                scale: DataScale::Large,
+                hierarchy_build_time: Duration::from_secs(300),
+                cached_query_time: Duration::from_millis(10),
+                uncached_query_time: Duration::from_secs(2),
+                sweep_time_per_threshold: Duration::from_millis(100),
+                memory_usage: ByteSize::gb(1),
+            },
         }
     }
 }

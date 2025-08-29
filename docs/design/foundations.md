@@ -1,17 +1,17 @@
-# EntityFrame Design Document A: Core design & mathematics
+# EntityFrame Design Document A: Core Design & Mathematics
 
-## Executive summary
+## Executive Summary
 
 EntityFrame represents a paradigm shift in entity resolution infrastructure. **Rather than forcing threshold decisions at processing time, EntityFrame captures the complete hierarchical structure of entity formation, enabling instant exploration of the entire resolution space.** This revolutionary approach achieves 10-100x performance improvements for threshold analysis while providing unprecedented insight into entity stability and formation patterns.
 
-The framework's core innovation lies in representing entity resolution outputs as hierarchical structures that generate partitions at any threshold. This enables O(1) incremental metric computation across thresholds, O(n) storage for infinite threshold granularity, and natural support for both probabilistic and deterministic entity data. By storing the complete resolution space, EntityFrame becomes the universal transport format for entity resolution - preserving all information needed for downstream analysis and decision-making.
+The framework's core innovation lies in representing entity resolution outputs as hierarchical structures that generate partitions at any threshold. This enables O(k) incremental metric computation across thresholds (where k = affected entities), O(m) storage for infinite threshold granularity (where m = number of edges), and natural support for entity data at any confidence level. By storing the complete resolution space, EntityFrame becomes the universal transport format for entity resolution - preserving all information needed for downstream analysis and decision-making.
 
-EntityFrame supports multiple collections within a single frame, enabling direct comparison of different resolution approaches. Each collection represents one attempt at resolving the same underlying records, whether from different algorithms, parameter settings, or confidence thresholds. This multi-collection architecture is fundamental to EntityFrame's value proposition: finding optimal resolution strategies through systematic comparison.
+EntityFrame supports multiple collections within a single frame, enabling direct comparison of different resolution approaches. Each collection is a hierarchy representing one attempt at resolving the same underlying records, whether from different algorithms, parameter settings, or confidence thresholds. This multi-collection architecture is fundamental to EntityFrame's value proposition: finding optimal resolution strategies through systematic comparison.
 
-## Core design principles
+## Core Design Principles
 
 ### Incremental computation: no work thrown away
-Every computation in EntityFrame builds upon previous work. When moving between thresholds, we update only what changes rather than recomputing from scratch. This principle drives our O(1) metric updates and makes complete threshold analysis computationally feasible.
+Every computation in EntityFrame builds upon previous work. When moving between thresholds, we update only what changes rather than recomputing from scratch. This principle drives our O(k) metric updates (where k = affected entities) and makes complete threshold analysis computationally feasible.
 
 ### Hierarchy generates partitions
 The hierarchy is not a fixed clustering but a generative structure. At any threshold, it produces a complete partition of records into entities. This distinction is fundamental - we store relationships and transformations, not just states.
@@ -28,9 +28,9 @@ The hierarchy preserves all information needed for threshold decisions. Users ca
 ### Optimised simplicity
 We choose simple, correct solutions and optimise them using Rust's low-level control. RoaringBitmaps for set operations, sparse matrices where naturally sparse, SIMD where beneficial - but no premature optimisation that adds complexity without clear benefit.
 
-## User requirements and stories
+## User Requirements and Stories
 
-### Core analysis requirements
+### Core Analysis Requirements
 
 **1. Optimal threshold discovery**
 *"I want to compare my new collection with an existing one at every threshold to figure out where to resolve it to truth"*
@@ -38,11 +38,11 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Compute comprehensive metrics (precision, recall, F1, ARI, NMI)
 - Identify optimal cut points for different objectives
 
-**2. Deterministic data comparison**
-*"I have pre-resolved entities without probabilities and need to compare with other data"*
-- Handle entities resolved at fixed thresholds
-- Compare deterministic and probabilistic data uniformly
-- Support evaluation without probability information
+**2. Fixed threshold data comparison**
+*"I have entities resolved at a fixed threshold and need to compare with other data"*
+- Handle entities resolved at any confidence level
+- Compare collections uniformly regardless of their threshold distribution
+- Support evaluation without requiring probabilistic scores
 
 **3. Multi-level quality assessment**
 *"Evaluate quality at varying confidence levels, then drill down to see specific differences"*
@@ -56,27 +56,28 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Identify stable vs unstable regions
 - Find critical merge points
 
-### Scale and performance requirements
+### Scale and Performance Requirements
 
 **5. Million-record scale**
 *"Handle millions of records without memory explosion"*
 - Efficient memory usage for large-scale data
 - No quadratic blowup in storage
 - Practical performance at production scale
+- Note: Assumes sparse graphs from blocking/LSH preprocessing (m << n²)
 
-**6. Streaming and incremental updates**
-*"Add new records without rebuilding everything"*
-- Support online entity resolution
-- Incremental hierarchy updates
-- Maintain performance with growing data
+**6. Batch processing excellence**
+*"Process large datasets efficiently in batch mode"*
+- Optimized batch hierarchy construction
+- Parallel processing capabilities
+- Memory-mapped storage for out-of-core processing
 
 **7. Production deployment**
 *"Actually work at scale in production, not just in theory"*
 - Predictable performance characteristics
 - Monitoring and observability
-- Clear path to distributed processing
+- Clear scaling boundaries and expectations
 
-### Integration and collaboration requirements
+### Integration and Collaboration Requirements
 
 **8. Data transport and serialisation**
 *"Share entity resolution results while preserving all information"*
@@ -96,7 +97,7 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Track source attribution
 - Support heterogeneous key types (u32, u64, String, bytes)
 
-### Decision support requirements
+### Decision Support Requirements
 
 **11. Deferred threshold decisions**
 *"Don't force threshold choices until I have enough information"*
@@ -116,7 +117,7 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Enable custom metric definitions
 - Provide confidence intervals
 
-### Strategic requirements
+### Strategic Requirements
 
 **14. Foundation for multiple projects**
 *"Underpin different entity resolution projects with one framework"*
@@ -157,9 +158,9 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Preserve provenance from multiple resolution stages
 - Enable hierarchical resolution workflows
 
-## Layer 1: Mathematical foundations
+## Layer 1: Mathematical Foundations
 
-### The multi-collection entity model
+### The Multi-Collection Entity Model
 
 **Core representation: multiple hierarchies, shared records**
 
@@ -167,12 +168,12 @@ EntityFrame fundamentally supports multiple entity collections over a shared rec
 
 An EntityFrame `F` is formally defined as: `F = (R, {H₁, H₂, ..., Hₙ}, I)` where:
 - `R` is the shared set of records across all collections
-- `Hᵢ` are the hierarchical structures (collections)
+- `Hᵢ` are the hierarchical structures (collections ARE hierarchies)
 - `I` is the interning system for efficient reference storage
 
 Each hierarchy `Hᵢ` represents a complete entity resolution attempt over the record space `R`.
 
-### Entity representation: sets of interned references
+### Entity Representation: Sets of Interned References
 
 **The fundamental entity structure**
 
@@ -199,7 +200,7 @@ To prevent explosive growth in string storage, EntityFrame interns all source id
 - References become compact tuples: (0, 1), (0, 9), (1, 17), (2, 42)
 - Typical compression: 80-90% reduction in memory usage
 
-### Hierarchical partitions
+### Hierarchical Partitions
 
 **Hierarchy generates partitions at any threshold**
 
@@ -213,7 +214,7 @@ Each collection's hierarchy `H` consists of partition levels: `H = {(t₁, P₁)
 2. **Partition monotonicity**: If `t₁ < t₂`, then `P(t₁)` is a refinement of `P(t₂)`
 3. **Completeness**: Every record appears in exactly one entity at any threshold
 
-### Hierarchy construction via connected components
+### Hierarchy Construction via Connected Components
 
 **Threshold-based connected components approach**
 
@@ -222,11 +223,11 @@ EntityFrame uses threshold-based connected components to build hierarchies from 
 1. Given edges with similarities: `{(record_i, record_j, similarity)}`
 2. At threshold `t`, include all edges where `similarity ≥ t`
 3. Find connected components to form entities
-4. Repeat for each unique similarity value
+4. Store merge events that transition between partitions
 
-This approach naturally handles the probabilistic match scores common in entity resolution, where any evidence of connection should link records.
+**Complexity analysis**: O(m log m) where m is the number of edges. For practical entity resolution with blocking/LSH preprocessing, m is typically O(n) to O(n log n), not O(n²).
 
-### N-way merges and real-world patterns
+### N-way Merges and Real-World Patterns
 
 **Natural n-way merge representation**
 
@@ -241,7 +242,7 @@ Threshold 0.9: [{A,B,C,D}]  // 4-way merge, not sequential binary merges
 
 The union-find algorithm naturally handles these n-way merges without forcing artificial binary tree structures.
 
-### Incremental metric computation
+### Incremental Metric Computation
 
 **The mathematical foundation for efficiency**
 
@@ -252,7 +253,7 @@ For any additive metric `M`:
 M(P(t + Δt)) = M(P(t)) + ΔM(t, t + Δt)
 ```
 
-Where `ΔM` depends only on entities that changed.
+Where `ΔM` depends only on entities that changed (k entities), giving us O(k) updates.
 
 **Contingency table evolution**
 
@@ -261,16 +262,16 @@ For comparing two partitions:
 N_{ij}(t + Δt) = N_{ij}(t) + ΔN_{ij}
 ```
 
-This enables O(1) updates for metrics like ARI and NMI as we move between thresholds.
+This enables O(k) updates for metrics like ARI and NMI as we move between thresholds, where k is the number of affected entities.
 
-### Complete mathematical operation space
+### Complete Mathematical Operation Space
 
 **Pairwise classification metrics**
 - **Precision**: `P(t) = |TP(t)| / (|TP(t)| + |FP(t)|)`
 - **Recall**: `R(t) = |TP(t)| / (|TP(t)| + |FN(t)|)`
 - **F-measure**: `F_β(t) = (1 + β²) · P(t) · R(t) / (β² · P(t) + R(t))`
 
-These update incrementally as only changed pairs need recomputation.
+These update incrementally in O(k) as only changed pairs need recomputation.
 
 **Cluster evaluation metrics**
 
@@ -280,26 +281,26 @@ For partition `P₁` at threshold `t` compared with ground truth `P₂`:
   ```
   ARI(t) = (RI(t) - E[RI]) / (max(RI) - E[RI])
   ```
-  Incrementally updatable via contingency table updates.
+  Incrementally updatable in O(k) via contingency table updates.
   
 - **Normalised Mutual Information (NMI)**:
   ```
   NMI(t) = 2·I(P₁(t); P₂) / (H(P₁(t)) + H(P₂))
   ```
-  Incrementally updatable via mutual information terms.
+  Incrementally updatable in O(k) via mutual information terms.
   
 - **V-measure**:
   ```
   V(t) = 2·h(t)·c(t) / (h(t) + c(t))
   ```
-  Where h = homogeneity, c = completeness. Incrementally updatable.
+  Where h = homogeneity, c = completeness. Incrementally updatable in O(k).
 
 - **B-cubed metrics**:
   ```
   B³-Precision = Σᵢ (1/|R|) · (1/|Cᵢ|) · Σⱼ∈Cᵢ |Cᵢ ∩ Lⱼ|²/|Lⱼ|
   B³-Recall = Σᵢ (1/|R|) · (1/|Lᵢ|) · Σⱼ∈Lᵢ |Lᵢ ∩ Cⱼ|²/|Cⱼ|
   ```
-  Semi-incremental: O(k × avg_entity_size) where k is number of affected entities. Requires recalculation for all records in affected entities.
+  Semi-incremental: O(k × avg_entity_size) where k is number of affected entities.
 
 **Set-theoretic operations**
 
@@ -318,7 +319,7 @@ Unique to hierarchical representation:
 - **Stability score**: `S(t₁, t₂) = |P(t₁) ∩ P(t₂)| / |P(t₁) ∪ P(t₂)|`
 - **Resolution entropy**: `H(t) = -Σᵢ (|Eᵢ|/|R|) log(|Eᵢ|/|R|)`
 
-### Multi-collection comparison
+### Multi-Collection Comparison
 
 **Cross-collection analysis**
 
@@ -328,7 +329,7 @@ EntityFrame enables sophisticated comparison across collections. Importantly, th
 A cut through a collection is denoted as `(collection_name, threshold)`, for example:
 - `("splink_v1", 0.85)` - Splink output at threshold 0.85
 - `("dedupe_v2", 0.76)` - Dedupe output at threshold 0.76
-- `"ground_truth"` - Deterministic collection needs no threshold
+- `("ground_truth", 1.0)` - Fixed entities represented as hierarchy at threshold 1.0
 
 **Agreement analysis**:
 ```
@@ -341,7 +342,7 @@ Consensus(t₁, ..., tₙ) = argmin_P Σᵢ d(P, Cᵢ(tᵢ))
 ```
 Where each collection Cᵢ uses its own calibrated threshold tᵢ.
 
-### Information-theoretic framework
+### Information-Theoretic Framework
 
 **Hierarchy as information preservation**
 
@@ -365,15 +366,16 @@ MI(C₁, t₁, C₂, t₂) = Σᵢⱼ p(i,j) log(p(i,j)/(p₁(i)p₂(j)))
 ```
 Mutual information between two collections at their respective thresholds.
 
-### Theoretical guarantees
+### Theoretical Guarantees
 
 **Computational complexity**
 
-- **Hierarchy construction**: O(n² log n) worst case, O(n log n) typical
-- **Threshold query**: O(n) to extract partition
+- **Hierarchy construction**: O(m log m) where m = number of edges
+- **Threshold query**: O(m) to reconstruct partition (O(1) if cached)
 - **Metric update**: O(k) where k is number of changed entities
 - **Full threshold sweep**: O(m·k) where m is number of merge events
-- **Storage**: O(n·m) where m is number of unique thresholds
+- **Storage**: O(m) where m is number of edges/merge events
+- **Memory in practice**: For 1M edges, expect 50-250MB depending on merge complexity
 
 **Mathematical properties**
 
@@ -381,3 +383,11 @@ Mutual information between two collections at their respective thresholds.
 2. **Lattice structure**: Partitions form a lattice under refinement ordering
 3. **Monotone metrics**: Metrics evolve monotonically between merge events
 4. **Convergence**: All records eventually merge into single entity as t→0
+
+**Practical scalability assumptions**
+
+EntityFrame is designed for realistic entity resolution scenarios where:
+- Edge lists are sparse due to blocking/LSH preprocessing
+- m (number of edges) is O(n) to O(n log n), not O(n²)
+- For 1M records, we expect 1-10M edges, not 1 trillion
+- If your blocking produces dense graphs approaching O(n²), the problem lies in the blocking strategy, not EntityFrame

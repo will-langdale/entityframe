@@ -1,65 +1,102 @@
 # EntityFrame Design Documents Overview
 
-## Project Summary
-EntityFrame is a Rust-backed Python framework for entity resolution that captures the complete hierarchical structure of entity formation, enabling instant exploration of the entire resolution space without forcing threshold decisions at processing time.
+## The Problem: Entity Resolution Needs Better Infrastructure
+
+Entity resolution produces rich hierarchical relationships between records, but the field lacks a unified data structure to:
+- **Analyze**: Compare different resolution methods systematically
+- **Represent**: Store complete resolution information without premature decisions
+- **Transport**: Share results between teams, tools, and stages of processing
+
+Current approaches force threshold decisions too early, lose information between pipeline stages, and make it impossible to compare outputs from different methods. EntityFrame provides the foundational data structure to solve all three problems.
+
+## Core Architecture: Merge Events as Universal Representation
+
+EntityFrame stores entity resolution outputs as sequences of merge events - the fundamental transitions that occur as similarity thresholds change. This representation serves as:
+
+- **Analysis substrate**: O(k) incremental metric computation between thresholds
+- **Complete representation**: All possible partitions recoverable from ~50-250MB of merge events (vs ~10GB if stored explicitly)
+- **Transport format**: Preserves full resolution information for downstream decisions
+
+```
+Pipeline Stage A → EntityFrame → Pipeline Stage B
+(Splink output)    (merge events)   (threshold selection)
+                         ↓
+                   Pipeline Stage C
+                   (quality analysis)
+```
 
 ## Document Structure
 
 ### [Document A: Core Design & Mathematics](foundations.md)
-**Purpose**: Establishes the theoretical foundation and user requirements
+**The Foundation**
 
-- **Core Principles**: Incremental computation, hierarchy generates partitions, lazy evaluation
-- **User Requirements**: 19 detailed user stories covering analysis, scale, integration, and decision support
-- **Mathematical Foundations**: 
-  - Multi-collection entity model: F = (R, {H₁, H₂, ..., Hₙ}, I) where hierarchies ARE collections
-  - Entities as sets of interned references across heterogeneous sources
-  - Hierarchical partitions via connected components (single-linkage)
-  - N-way merge support without forced binary structures
-  - Complete mathematical operation space (ARI, NMI, V-measure, semi-incremental B-cubed)
-  - Information-theoretic framework for stability analysis
+Establishes EntityFrame as the universal container for entity resolution:
+- Multi-collection model: F = (R, {H₁, H₂, ..., Hₙ}, I) 
+- Collections ARE hierarchies (even fixed clusters at threshold 1.0)
+- 19 user stories covering analysis, transport, and integration needs
+- Mathematical framework for correctness and performance guarantees
 
 ### [Document B: Technical Implementation](implementation.md)
-**Purpose**: Details the computer science techniques and engineering design
+**The Engine**
 
-- **Layer 2 - CS Techniques**:
-  - Core data structures with RoaringBitmaps
-  - String interning with flexible key types (u32, u64, String, bytes)
-  - Connected components algorithm for hierarchy construction
-  - Lazy metric computation framework
-  - Sparse structure exploitation
-  - SIMD and cache optimisations
-  - Parallel processing with Rayon
-  - Dual processing: built-in Rust operations vs Python callbacks
-  
-- **Layer 3 - Engineering**:
-  - Multi-collection EntityFrame architecture
-  - Python interface via PyO3
-  - Incremental/streaming updates
-  - Production deployment considerations
-  - High-performance entity hashing (SHA256, BLAKE3)
-  - Entity processing with map functions
+Optimized Rust implementation for production scale:
+- **Memory efficiency**: String interning, RoaringBitmaps, sparse structures
+- **Performance**: Parallel processing, SIMD operations, smart caching
+- **Flexibility**: Dual processing model (Rust built-ins + Python extensions)
+- **Integration**: PyO3 bindings, Arrow serialization, monitoring hooks
 
 ### [Document C: Reference Architecture](reference.md)
-**Purpose**: Provides practical API reference and implementation roadmap
+**The Interface**
 
-- **Complete API Reference**: Python and Rust APIs with examples
-- **Data Structure Specifications**: Memory layouts and serialisation formats
-- **Data Shape Specifications**: Input formats for records and collections
-- **Built-in Operations**: Parallel hashing and entity processing functions
-- **Integration Examples**: Splink, er-evaluation, Matchbox, Arrow
-- **Implementation Roadmap**: 12-month plan with quarterly phases
-- **Performance Benchmarks**: Target metrics for different scales
-- **Migration Guide**: Moving from existing approaches
+Complete specification for users and integrators:
+- **Unified API**: Single data model for all resolution types
+- **Tool adapters**: Splink, er-evaluation, Matchbox integrations
+- **Transport protocols**: Arrow/Parquet for cross-system compatibility
+- **Production guidance**: Benchmarks, deployment patterns, migration paths
 
-## Key Innovation
-Rather than storing entities at fixed thresholds, EntityFrame stores hierarchical structures that can generate partitions at any threshold instantly, enabling O(1) incremental metric updates and preserving complete information for collaborative decision-making.
+## Why EntityFrame Is The Right Foundation
 
-## Use Cases
-- Finding optimal thresholds for entity resolution
-- Comparing multiple resolution approaches with proper calibration
-- Analysing threshold sensitivity and entity stability
-- Supporting both probabilistic and deterministic entity data
-- High-performance entity hashing for deduplication
-- Joining pre-resolved entities from multiple sources
-- Running arbitrary functions on resolved entities
-- Scaling to millions of records efficiently
+### For Analysis
+- Compare any two resolution methods at any thresholds
+- Sweep 1000 thresholds in seconds, not hours
+- Track entity stability and formation patterns
+- Compute standard metrics (ARI, NMI, B-cubed) incrementally
+
+### For Representation
+- Store complete resolution space in minimal memory
+- Defer threshold decisions until sufficient information available
+- Support heterogeneous data sources and ID types
+- Handle both probabilistic scores and fixed clusters uniformly
+
+### For Transport
+- Share resolution outputs without information loss
+- Enable pipeline stages to operate independently
+- Preserve provenance and enable reproducibility
+- Support batch processing at million-record scale
+
+## Key Design Principles
+
+1. **Information preservation**: Never force premature threshold decisions
+2. **Incremental computation**: Reuse work between adjacent thresholds
+3. **Universal representation**: One format for all entity resolution outputs
+4. **Production reality**: Optimize for sparse graphs from real blocking strategies
+
+## The Value Proposition
+
+EntityFrame transforms entity resolution from isolated threshold decisions into a continuous exploration space. It's the difference between:
+
+**Without EntityFrame**: Each tool/stage makes irreversible decisions
+```
+Blocking → Matching → Clustering → Analysis
+   ↓          ↓           ↓            ↓
+(loses)    (loses)     (loses)    (too late)
+```
+
+**With EntityFrame**: Preserve everything, decide later
+```
+Blocking → Matching → EntityFrame → Any threshold
+                           ↓         Any comparison  
+                      (preserves all) Any transport
+```
+
+By providing a single, optimized data structure for the complete entity resolution lifecycle, EntityFrame enables systematic analysis, lossless representation, and seamless transport of resolution results across tools and teams.
