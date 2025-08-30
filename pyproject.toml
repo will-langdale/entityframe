@@ -1,6 +1,6 @@
 [project]
 name = "starlings"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A Python package for comparing entity resolutions from different processes"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -26,6 +26,10 @@ keywords = ["entity-resolution", "data-processing", "rust"]
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
+
+# Presence enables setuptools-scm
+[tool.setuptools_scm]
+
 
 [tool.maturin]
 python-source = "src/python"

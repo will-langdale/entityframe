@@ -14,7 +14,7 @@ jobs:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v6
@@ -44,7 +44,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -75,7 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v6
@@ -101,7 +101,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@v6
@@ -121,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install uv and Python
         uses: astral-sh/setup-uv@v6
