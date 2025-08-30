@@ -1,7 +1,7 @@
-site_name: "EntityFrame"
-site_description: "Documentation for EntityFrame"
-repo_url: "https://github.com/will-langdale/entityframe"
-repo_name: "will-langdale/entityframe"
+site_name: "starlings"
+site_description: "Documentation for starlings"
+repo_url: "https://github.com/will-langdale/starlings"
+repo_name: "will-langdale/starlings"
 
 nav:
 - Home: index.md
@@ -109,5 +109,5 @@ plugins:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/will-langdale/EntityFrame
+      link: https://github.com/will-langdale/starlings
   generator: false

@@ -3,7 +3,7 @@ Batch hashing functionality tests using the new API.
 Tests core batch hashing functionality, consistency, and correctness.
 """
 
-from entityframe import EntityFrame
+from starlings import EntityFrame
 
 
 class TestBatchHashing:

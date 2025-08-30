@@ -3,7 +3,7 @@ Tests for core EntityFrame components: StringInterner and Entity.
 """
 
 import pytest
-from entityframe import StringInterner, EntityCore
+from starlings import StringInterner, EntityCore
 
 
 class TestStringInterner:
@@ -98,7 +98,7 @@ class TestEntity:
 
     def test_dataset_operations(self):
         """Test dataset-related operations through EntityFrame context."""
-        from entityframe import EntityFrame
+        from starlings import EntityFrame
 
         # Entity operations now require Frame context for proper dataset name resolution
         frame = EntityFrame()

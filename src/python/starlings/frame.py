@@ -5,7 +5,7 @@ Python wrapper for EntityFrame to provide convenient collection attribute access
 from __future__ import annotations
 from typing import Any, Dict, List
 from .collection import Collection
-from .entityframe import EntityFrame as RustEntityFrame
+from .starlings import EntityFrame as RustEntityFrame
 
 
 class EntityFrame:

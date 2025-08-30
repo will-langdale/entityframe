@@ -3,7 +3,7 @@ Tests for EntityFrame functionality (multi-collection container).
 """
 
 import pytest
-from entityframe import StringInterner, CollectionCore, EntityFrame
+from starlings import StringInterner, CollectionCore, EntityFrame
 
 
 class TestEntityFrame:
