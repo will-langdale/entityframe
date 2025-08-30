@@ -1,439 +1,546 @@
-# EntityFrame Design Document C: Reference Architecture
+# Starlings Design Document C: Reference Architecture
 
 ## Complete API Reference
 
 ### Python API
 
+The Starlings API design is inspired by [Polars](https://pola.rs/), adopting its expression-based approach for composable, efficient data operations. Like Polars, we provide a clear separation between data containers (EntityFrame/Collection) and operations (expressions), enabling users to build complex analyses from simple, chainable components. This design philosophy emphasizes being opinionated about the "right way" to do things while maintaining flexibility for advanced use cases.
+
 #### Core EntityFrame Operations
 
 ```python
+import starlings as sl
+
 class EntityFrame:
     """
     Main container for multiple entity resolution collections over shared records.
+    
+    Mathematically: F = (R, {H₁, H₂, ..., Hₙ}, I) where collections ARE hierarchies.
     """
     
-    def __init__(self, config: Optional[Dict] = None):
-        """
-        Initialize EntityFrame.
-        
-        Args:
-            config: Optional configuration dict with keys:
-                - 'parallel_workers': Number of parallel threads (default: CPU count)
-                - 'cache_size_mb': LRU cache size for metrics (default: 100)
-                - 'arrow_batch_size': Batch size for Arrow operations (default: 10000)
-                - 'string_intern_capacity': Initial interner capacity (default: 10000)
-        """
-    
-    def load_records(self, 
-                    source_name: str, 
+    @classmethod
+    def from_records(cls, source_name: str, 
                     data: Union[pd.DataFrame, pa.Table, List[Dict]],
-                    id_column: Optional[str] = None) -> int:
+                    key_column: Optional[str] = None) -> 'EntityFrame':
         """
-        Load records from a data source.
+        Create EntityFrame from records.
         
         Args:
             source_name: Name of the source (e.g., "CRM", "MailingList")
             data: Records as DataFrame, Arrow Table, or list of dicts
-            id_column: Column to use as local ID (default: auto-generate)
+            key_column: Column to use as key (default: auto-generate)
             
         Returns:
-            Number of records loaded
+            New EntityFrame containing the records
             
         Example:
-            frame.load_records("CRM", df_customers, id_column="customer_id")
+            ef = sl.from_records("CRM", df_customers, key_column="customer_id")
         """
     
     def add_collection(self,
                       name: str,
-                      hierarchy: Optional[Hierarchy] = None,
-                      clusters: Optional[List[Set]] = None,
-                      similarities: Optional[np.ndarray] = None) -> str:
+                      edges: Optional[List[Tuple[int, int, float]]] = None,
+                      collection: Optional['Collection'] = None) -> None:
         """
         Add an entity resolution collection to the frame.
         
+        Collections are hierarchies built from edges or can be added directly.
+        Fixed clusterings should be provided as edges with weight 1.0.
+        
         Args:
             name: Unique name for this collection
-            hierarchy: Pre-built hierarchy object
-            clusters: Fixed clustering (creates degenerate hierarchy)
-            similarities: Build hierarchy from similarity matrix
+            edges: List of (record_i, record_j, similarity) tuples
+            collection: Existing Collection object
             
-        Returns:
-            Collection ID
+        Note:
+            Internally creates a hierarchy from the provided data.
             
         Example:
-            frame.add_collection("splink_v1", hierarchy=splink_hierarchy)
-            frame.add_collection("ground_truth", clusters=truth_clusters)
+            # From probabilistic model
+            ef.add_collection("splink_v1", edges=splink_edges)
+            
+            # From existing collection
+            ef.add_collection("dedupe_v2", collection=dedupe_collection)
+            
+            # From fixed clustering (use weight 1.0)
+            fixed_edges = [(i, j, 1.0) for cluster in clusters for i, j in pairs(cluster)]
+            ef.add_collection("ground_truth", edges=fixed_edges)
         """
     
-    def compare(self,
-               collection_a: str,
-               collection_b: str,
-               threshold: float = None,
-               metrics: List[str] = None) -> Dict[str, float]:
+    def __getitem__(self, name: str) -> 'Collection':
         """
-        Compare two collections at a specific threshold.
+        Get collection by name for direct operations.
+        
+        Returns a view of the collection that shares the frame's DataContext.
+        
+        Example:
+            partition = ef["splink"].at(0.85)
+            sweep_df = ef["splink"].sweep(0.5, 0.95)
+        """
+    
+    def analyse(self, *expressions, metrics: Optional[List] = None) -> Union[Dict, pd.DataFrame]:
+        """
+        Universal analysis method using expressions.
+        
+        This is the primary method for cross-collection comparisons and analysis.
+        Inspired by polars' expression API for composability.
         
         Args:
-            collection_a: First collection name
-            collection_b: Second collection name (often ground truth)
-            threshold: Threshold for comparison (required if collection_a is hierarchical)
-            metrics: List of metrics to compute (default: all)
-                     Options: 'precision', 'recall', 'f1', 'ari', 'nmi', 
-                              'v_measure', 'bcubed_precision', 'bcubed_recall'
+            *expressions: One or more sl.col() expressions
+            metrics: List of metrics to compute. Defaults to sl.report which 
+                     includes [f1, precision, recall, ari, nmi] for comparisons
+                     or [entity_count, entropy] for single collections.
+                     Available metrics: sl.f1, sl.precision, sl.recall, sl.ari, 
+                                      sl.nmi, sl.v_measure, sl.bcubed_precision,
+                                      sl.bcubed_recall, sl.entropy, sl.entity_count
         
         Returns:
-            Dictionary of metric values
+            Dict for point comparisons, DataFrame for sweeps
             
         Example:
-            results = frame.compare("splink_v1", "ground_truth", threshold=0.85)
+            # Compare two collections at specific thresholds
+            results = ef.analyse(
+                sl.col("splink").at(0.85),
+                sl.col("ground_truth").at(1.0),
+                metrics=[sl.f1, sl.precision, sl.recall]
+            )
+            
+            # Sweep analysis
+            sweep_df = ef.analyse(
+                sl.col("splink").sweep(0.5, 0.95, 0.01),
+                sl.col("ground_truth").at(1.0)
+            )
+            
+            # Single collection analysis (uses sl.report by default)
+            stats = ef.analyse(
+                sl.col("splink").at(0.85)
+            )  # Returns entity_count, entropy, and other single-collection metrics
         """
     
-    def find_optimal_threshold(self,
-                              collection: str,
-                              truth: str,
-                              metric: str = 'f1',
-                              search_range: Tuple[float, float] = (0.0, 1.0)) -> OptimalResult:
+    # American spelling alias
+    analyze = analyse
+    
+    def drop(self, *names: str) -> None:
         """
-        Find threshold that optimizes a metric.
+        Remove collections from the frame.
+        
+        Follows pandas/polars convention. Triggers automatic compaction
+        when garbage exceeds 50% of total records.
         
         Args:
-            collection: Collection to optimize
-            truth: Ground truth collection
-            metric: Metric to optimize
-            search_range: Range of thresholds to search
-            
-        Returns:
-            OptimalResult with threshold, score, and full metrics
+            *names: Names of collections to drop
             
         Example:
-            optimal = frame.find_optimal_threshold("splink_v1", "ground_truth")
-            print(f"Best threshold: {optimal.threshold} (F1={optimal.score})")
+            ef.drop("splink_v1", "splink_v2")
         """
     
-    def get_entity(self,
-                  collection: str,
-                  threshold: float,
-                  entity_id: int) -> Entity:
+    def to_arrow(self) -> pa.Table:
         """
-        Get a specific entity from a collection at a threshold.
+        Export EntityFrame to Arrow format.
+        
+        Uses dictionary encoding for efficient storage of repeated strings.
         
         Returns:
-            Entity object with members as (source, local_id) pairs
+            Arrow Table with complete frame data
+        """
+    
+    @classmethod
+    def from_arrow(cls, table: pa.Table) -> 'EntityFrame':
+        """
+        Load EntityFrame from Arrow format.
+        
+        Args:
+            table: Arrow Table created by to_arrow()
             
-        Example:
-            entity = frame.get_entity("splink_v1", 0.85, entity_id=42)
-            for source, record_id in entity.members:
-                print(f"{source}: {record_id}")
+        Returns:
+            Reconstructed EntityFrame
         """
 ```
 
-#### Hierarchy Operations
+#### Collection Operations
 
 ```python
-class Hierarchy:
+class Collection:
     """
     Hierarchical partition structure that generates entities at any threshold.
-    """
     
-    @classmethod
-    def from_similarities(cls,
-                         similarity_matrix: np.ndarray,
-                         method: str = 'single',
-                         record_ids: Optional[List] = None) -> 'Hierarchy':
-        """
-        Build hierarchy from similarity matrix.
-        
-        Args:
-            similarity_matrix: Square matrix of pairwise similarities
-            method: Linkage method ('single', 'average', 'complete')
-            record_ids: Optional record identifiers
-            
-        Returns:
-            New Hierarchy object
-        """
+    Collections exist in two states:
+    - Standalone: Owns its DataContext exclusively (created via from_* methods)
+    - View: Shares DataContext with parent EntityFrame (created via ef["name"])
+    
+    When a view is modified or copied, it automatically becomes standalone
+    through Copy-on-Write, creating its own DataContext.
+    """
     
     @classmethod
     def from_edges(cls,
-                  edges: List[Tuple[int, int, float]],
-                  num_records: int) -> 'Hierarchy':
+                  edges: List[Tuple[Any, Any, float]],
+                  num_records: Optional[int] = None,
+                  quantize: Optional[int] = None) -> 'Collection':
         """
-        Build hierarchy from weighted edges.
+        Build collection from weighted edges.
         
         Args:
             edges: List of (record_i, record_j, similarity) tuples
+                  Records can be any hashable type (int, str, bytes)
+            num_records: Total number of records (auto-detected if None)
+            quantize: Optional decimal places to round thresholds to
+                     (e.g., quantize=4 rounds to 0.0001 precision)
+            
+        Returns:
+            New Collection with hierarchy of merge events
+            
+        Note:
+            Complexity: O(m log m) where m = len(edges).
+            
+        Example:
+            edges = [
+                ("cust_123", "cust_456", 0.95),
+                (123, 456, 0.85),
+                (b"hash1", b"hash2", 0.75)
+            ]
+            collection = sl.Collection.from_edges(edges, quantize=4)
+        """
+    
+    @classmethod
+    def from_entities(cls,
+                     entities: List[Set[Any]],
+                     threshold: float = 1.0) -> 'Collection':
+        """
+        Build collection from pre-resolved entities.
+        
+        Converts fixed entities to a hierarchy at specified threshold.
+        
+        Args:
+            entities: List of entity sets
+            threshold: Threshold at which these entities exist
+            
+        Returns:
+            New Collection
+            
+        Example:
+            entities = [
+                {"cust_123", "cust_456"},
+                {"user_xyz", "user_abc"}
+            ]
+            collection = sl.Collection.from_entities(entities)
+        """
+    
+    @classmethod
+    def from_merge_events(cls,
+                         merges: List[Dict],
+                         num_records: int) -> 'Collection':
+        """
+        Build collection from merge events directly.
+        
+        For resuming work or loading from database.
+        
+        Args:
+            merges: List of merge event dictionaries
             num_records: Total number of records
             
         Returns:
-            New Hierarchy object
+            New Collection
+            
+        Example:
+            merges = [
+                {"threshold": 0.9, "merging": [0, 1], "result": 2},
+                {"threshold": 0.8, "merging": [2, 3], "result": 4}
+            ]
+            collection = sl.Collection.from_merge_events(merges, 100)
         """
     
-    def at_threshold(self, threshold: float) -> Partition:
+    def at(self, threshold: float) -> 'Partition':
         """
         Get partition at specific threshold.
+        
+        Note:
+            First call at threshold: O(m) reconstruction
+            Subsequent calls: O(1) from cache
         
         Returns:
             Partition object with entities at that threshold
             
         Example:
-            partition = hierarchy.at_threshold(0.85)
+            partition = collection.at(0.85)
             print(f"Number of entities: {len(partition.entities)}")
         """
     
-    def analyze_threshold_range(self,
-                              start: float,
-                              end: float,
-                              step: float = 0.01) -> ThresholdAnalysis:
+    def sweep(self, start: float = 0.0, 
+             stop: float = 1.0, 
+             step: float = 0.01) -> pd.DataFrame:
         """
-        Analyze behavior across threshold range.
+        Analyse collection across threshold range.
+        
+        Note:
+            Uses incremental O(k) updates between thresholds.
         
         Returns:
-            ThresholdAnalysis with stability regions, critical points, etc.
+            DataFrame with stability analysis
             
         Example:
-            analysis = hierarchy.analyze_threshold_range(0.5, 0.95)
-            for start, end in analysis.stable_regions:
-                print(f"Stable from {start:.2f} to {end:.2f}")
+            analysis = collection.sweep(0.5, 0.95)
+            analysis.plot(x='threshold', y='entity_count')
         """
     
-    def track_entity_lifetime(self, record_id: int) -> List[EntityLifetime]:
+    def copy(self) -> 'Collection':
         """
-        Track how a record's entity membership changes.
+        Create an owned copy of this collection.
+        
+        If collection is a view from an EntityFrame, creates a deep copy
+        with its own DataContext. If already owned, returns a copy.
         
         Returns:
-            List of (threshold_start, threshold_end, entity_size) tuples
+            New Collection with independent data
             
         Example:
-            lifetime = hierarchy.track_entity_lifetime(record_id=123)
-            for t_start, t_end, size in lifetime:
-                print(f"In size-{size} entity from {t_start} to {t_end}")
-        """
-    
-    def diff_thresholds(self,
-                       threshold_a: float,
-                       threshold_b: float) -> ThresholdDiff:
-        """
-        Find differences between two thresholds.
-        
-        Returns:
-            ThresholdDiff with merges, splits, affected records
-            
-        Example:
-            diff = hierarchy.diff_thresholds(0.8, 0.85)
-            print(f"Entities merging: {diff.merging_entities}")
+            view = ef["splink"]  # Lightweight view
+            owned = view.copy()  # Deep copy with own data
         """
 ```
 
-#### Analysis Operations
+#### Expression API
 
 ```python
-class ThresholdSweep:
+# Expression builders for analyse() method
+class col:
     """
-    Efficient threshold sweep analysis.
+    Create a collection expression for analysis.
+    
+    Inspired by polars.col() for consistent API design.
     """
     
-    def __init__(self,
-                frame: EntityFrame,
-                collection: str,
-                truth: str):
-        """Initialize sweep analysis."""
-    
-    def compute_all_metrics(self,
-                           start: float = 0.0,
-                           end: float = 1.0,
-                           step: float = 0.01) -> pd.DataFrame:
+    def __init__(self, name: str):
         """
-        Compute all metrics across threshold range.
+        Reference a collection by name.
         
+        Example:
+            sl.col("splink")
+        """
+    
+    def at(self, threshold: float) -> 'Expression':
+        """
+        Specify threshold for this collection.
+        
+        Example:
+            sl.col("splink").at(0.85)
+        """
+    
+    def sweep(self, start: float, stop: float, step: float = 0.01) -> 'Expression':
+        """
+        Specify threshold range for sweeping.
+        
+        Example:
+            sl.col("splink").sweep(0.5, 0.95, 0.01)
+        """
+
+# Pre-defined metrics as module constants (injectable functions)
+f1 = F1Metric()
+precision = PrecisionMetric()
+recall = RecallMetric()
+ari = ARIMetric()
+nmi = NMIMetric()
+v_measure = VMeasureMetric()
+bcubed_precision = BCubedPrecisionMetric()
+bcubed_recall = BCubedRecallMetric()
+entropy = EntropyMetric()
+entity_count = EntityCountMetric()
+
+# Default metric bundle
+report = [f1, precision, recall, ari, nmi]
+```
+
+#### Partition Operations
+
+```python
+class Partition:
+    """
+    A partition of records into entities at a specific threshold.
+    """
+    
+    @property
+    def entities(self) -> List[Entity]:
+        """List of entities in this partition."""
+    
+    @property
+    def num_entities(self) -> int:
+        """Number of entities in this partition."""
+    
+    def map(self, func: Union[str, Callable]) -> Dict[int, Any]:
+        """
+        Apply function to each entity.
+        
+        Args:
+            func: Either a built-in operation name or callable
+                  Built-ins: sl.hash.sha256, sl.hash.blake3, sl.ops.size
+                  
         Returns:
-            DataFrame with columns: threshold, precision, recall, f1, ari, nmi, etc.
+            Dictionary mapping entity ID to result
             
         Example:
-            sweep = ThresholdSweep(frame, "splink_v1", "ground_truth")
-            results = sweep.compute_all_metrics(0.5, 0.95, 0.01)
-            results.plot(x='threshold', y=['precision', 'recall'])
+            # Built-in hash function (runs in parallel Rust)
+            hashes = partition.map(sl.hash.sha256)
+            
+            # Custom Python function
+            custom = partition.map(lambda e: len(e.members) * 2)
         """
     
-    def find_pareto_frontier(self,
-                           metric_x: str = 'precision',
-                           metric_y: str = 'recall') -> List[Tuple[float, float, float]]:
+    def to_list(self) -> List[Set[Tuple[str, Any]]]:
         """
-        Find Pareto-optimal thresholds.
+        Export entities as list of sets.
         
         Returns:
-            List of (threshold, metric_x_value, metric_y_value) tuples
+            List where each element is a set of (source, key) tuples
+            
+        Example:
+            entities = partition.to_list()
+            # [
+            #   {("CRM", "123"), ("CRM", "456")},
+            #   {("MailingList", "789")}
+            # ]
         """
+```
+
+### Built-in Operations
+
+```python
+# Hash operations (parallel execution in Rust)
+class hash:
+    sha256 = "hash:sha256"
+    sha512 = "hash:sha512"
+    md5 = "hash:md5"
+    blake3 = "hash:blake3"
+
+# Entity operations
+class ops:
+    size = "ops:size"  # Number of records in entity
+    density = "ops:density"  # Internal connectivity
+    fingerprint = "ops:fingerprint"  # MinHash or similar
+```
+
+### Data Shape Specifications
+
+#### Input Formats for from_records()
+
+```python
+# DataFrame input
+df = pd.DataFrame({
+    'customer_id': [1, 2, 3],      # Will be used as key if specified
+    'name': ['Alice', 'Bob', 'Charlie'],
+    'email': ['alice@ex.com', 'bob@ex.com', 'charlie@ex.com']
+})
+ef = sl.from_records("CRM", df, key_column='customer_id')
+
+# List of dicts input
+records = [
+    {'id': 1, 'name': 'Alice', 'email': 'alice@ex.com'},
+    {'id': 2, 'name': 'Bob', 'email': 'bob@ex.com'}
+]
+ef = sl.from_records("MailingList", records, key_column='id')
+
+# Arrow Table input
+table = pa.Table.from_pandas(df)
+ef = sl.from_records("OrderSystem", table, key_column='customer_id')
+```
+
+#### Input Formats for Collections
+
+```python
+# From edges (record pairs with similarities)
+edges = [
+    (0, 1, 0.95),  # Record 0 and 1 with 0.95 similarity
+    (1, 2, 0.85),  # Record 1 and 2 with 0.85 similarity
+    (0, 3, 0.75)   # Record 0 and 3 with 0.75 similarity
+]
+collection = sl.Collection.from_edges(edges)
+
+# From fixed entities
+entities = [
+    {0, 1, 4},  # First entity contains records 0, 1, 4
+    {2, 3},     # Second entity contains records 2, 3
+    {5, 6, 7, 8}  # Third entity
+]
+collection = sl.Collection.from_entities(entities)
+
+# From merge events (for persistence/resuming)
+merges = [
+    {"threshold": 0.9, "merging": [0, 1], "result": 2},
+    {"threshold": 0.8, "merging": [2, 3], "result": 4}
+]
+collection = sl.Collection.from_merge_events(merges, num_records=10)
+```
+
+## Arrow Schema
+
+### Serialisation Format
+
+```python
+# EntityFrame Arrow schema with dictionary encoding for efficiency
+schema = pa.schema([
+    # Records with dictionary-encoded sources
+    ("records", pa.list_(pa.struct([
+        ("source", pa.dictionary(pa.int16(), pa.string())),
+        ("key", pa.string()),  # Changed from local_id
+        ("record_index", pa.uint32())
+    ]))),
     
-    def stability_analysis(self) -> StabilityReport:
-        """
-        Analyze stability of resolution across thresholds.
-        
-        Returns:
-            StabilityReport with stable regions, volatility scores, etc.
-        """
-```
-
-### Rust API
-
-#### Core Structures
-
-```rust
-/// Main EntityFrame structure
-pub struct EntityFrame {
-    collections: HashMap<CollectionId, EntityCollection>,
-    records: InternedRecordStorage,
-    interner: InternSystem,
-    analyzer: FrameAnalyzer,
-    config: FrameConfig,
-}
-
-/// Individual entity collection with hierarchy
-pub struct EntityCollection {
-    hierarchy: PartitionHierarchy,
-    similarity_data: Option<SimilarityMatrix>,
-    metadata: CollectionMetadata,
-}
-
-/// Hierarchical partition structure
-pub struct PartitionHierarchy {
-    levels: BTreeMap<OrderedFloat<f64>, PartitionLevel>,
-    transitions: Vec<ThresholdTransition>,
-    computation_cache: ComputationCache,
-}
-
-/// Single partition at a threshold
-pub struct PartitionLevel {
-    threshold: f64,
-    entities: Vec<RoaringBitmap>,
-    statistics: PartitionStatistics,
-    lazy_metrics: LazyMetricsCache,
-}
-
-/// Interned record reference
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct InternedRef {
-    source_id: u16,    // Interned source name
-    local_id: u32,     // ID within that source
-}
-
-/// Entity as set of interned references
-pub struct Entity {
-    members: RoaringBitmap,  // Indices into record storage
-    cached_size: OnceCell<u32>,
-}
-```
-
-#### Key Traits
-
-```rust
-/// Trait for hierarchical structures
-pub trait Hierarchical {
-    fn at_threshold(&self, threshold: f64) -> &PartitionLevel;
-    fn threshold_range(&self) -> (f64, f64);
-    fn num_levels(&self) -> usize;
-    fn merge_events(&self) -> &[MergeEvent];
-}
-
-/// Trait for comparable partitions
-pub trait Comparable {
-    fn compare_with(&self, other: &Self) -> ComparisonMetrics;
-    fn contingency_table(&self, other: &Self) -> ContingencyTable;
-}
-
-/// Trait for incremental updates
-pub trait Incremental {
-    fn update_with_records(&mut self, records: &[Record]) -> UpdateResult;
-    fn update_with_similarities(&mut self, similarities: &[(u32, u32, f64)]) -> UpdateResult;
-}
-```
-
-## Data Structure Specifications
-
-### Memory Layout
-
-```rust
-/// Memory-efficient entity storage using RoaringBitmaps
-/// 
-/// For 1M records, 100K entities:
-/// - Traditional HashSet<u32>: ~400MB
-/// - RoaringBitmap: ~50MB (87% reduction)
-struct MemoryLayout {
-    // Level 1: Source interning
-    source_names: StringInterner,      // ~1KB for 100 sources
+    # Collections with merge events
+    ("collections", pa.list_(pa.struct([
+        ("name", pa.dictionary(pa.int8(), pa.string())),
+        ("merge_events", pa.list_(pa.struct([
+            ("threshold", pa.float64()),
+            ("merging_components", pa.list_(pa.uint32())),
+            ("result_component", pa.uint32()),
+            ("affected_records", pa.list_(pa.uint32()))  # Expanded from RoaringBitmap
+        ])))
+    ]))),
     
-    // Level 2: Record storage
-    record_refs: Vec<InternedRef>,     // 6 bytes per record
-    record_attrs: Option<Vec<Attrs>>,  // Optional attribute data
-    
-    // Level 3: Entity storage
-    entities: Vec<RoaringBitmap>,      // ~5 bytes per entity (sparse)
-    
-    // Level 4: Hierarchy
-    partitions: BTreeMap<Threshold, PartitionLevel>,  // ~500KB per level
-}
+    # Metadata
+    ("version", pa.string()),
+    ("created_at", pa.timestamp('ms'))
+])
 ```
 
-### Serialization Formats
+### Database Decomposition
 
-#### Arrow Schema
+The Arrow format can be decomposed into relational tables:
 
-```rust
-/// Arrow schema for EntityFrame serialization
-Schema {
-    fields: vec![
-        // Frame metadata
-        Field::new("version", DataType::Utf8, false),
-        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
-        
-        // Source dictionary
-        Field::new("sources", DataType::Dictionary(
-            Box::new(DataType::UInt16),
-            Box::new(DataType::Utf8)
-        ), false),
-        
-        // Records with interned references
-        Field::new("records", DataType::Struct(vec![
-            Field::new("source_id", DataType::UInt16, false),
-            Field::new("local_id", DataType::UInt32, false),
-        ]), false),
-        
-        // Collections
-        Field::new("collections", DataType::List(Box::new(DataType::Struct(vec![
-            Field::new("name", DataType::Utf8, false),
-            Field::new("hierarchy", DataType::Binary, false),  // Serialized hierarchy
-        ]))), false),
-    ]
-}
-```
+```sql
+-- Records table
+CREATE TABLE records (
+    record_index INTEGER PRIMARY KEY,
+    source VARCHAR(255),
+    key VARCHAR(255),
+    INDEX idx_source_key (source, key)
+);
 
-#### JSON Export Format
+-- Collections table  
+CREATE TABLE collections (
+    collection_id INTEGER PRIMARY KEY,
+    name VARCHAR(255) UNIQUE
+);
 
-```json
-{
-  "version": "1.0",
-  "metadata": {
-    "created_at": "2025-01-15T10:30:00Z",
-    "num_records": 1000000,
-    ביט"num_sources": 5,
-    "num_collections": 3
-  },
-  "sources": {
-    "0": "CRM",
-    "1": "MailingList",
-    "2": "OrderSystem"
-  },
-  "collections": [
-    {
-      "name": "splink_v1",
-      "type": "hierarchical",
-      "num_partitions": 87,
-      "threshold_range": [0.0, 1.0],
-      "statistics": {
-        "avg_entity_size": 12.5,
-        "stability_score": 0.73
-      }
-    }
-  ]
-}
+-- Merge events table
+CREATE TABLE merge_events (
+    merge_id INTEGER PRIMARY KEY,
+    collection_id INTEGER REFERENCES collections(collection_id),
+    threshold DOUBLE,
+    result_component INTEGER
+);
+
+-- Merge components junction table
+CREATE TABLE merge_components (
+    merge_id INTEGER REFERENCES merge_events(merge_id),
+    component_id INTEGER,
+    PRIMARY KEY (merge_id, component_id)
+);
+
+-- Affected records junction table
+CREATE TABLE merge_affected_records (
+    merge_id INTEGER REFERENCES merge_events(merge_id),
+    record_index INTEGER REFERENCES records(record_index),
+    PRIMARY KEY (merge_id, record_index)
+);
 ```
 
 ## Integration Examples
@@ -442,65 +549,90 @@ Schema {
 
 ```python
 import splink
-import entityframe as ef
+import starlings as sl
 
 # Run Splink
 linker = splink.Linker(df, settings)
 linker.predict()
-clusters = linker.cluster_pairwise_at_threshold(0.85)
 
-# Import into EntityFrame
-frame = ef.EntityFrame()
-frame.load_records("source", df)
-frame.add_collection("splink_output", clusters=clusters)
+# Get edges from Splink (not clusters)
+edges = linker.get_scored_comparisons()
+edges = [(e['id_l'], e['id_r'], e['match_probability']) for e in edges]
 
-# Compare with different threshold
-clusters_90 = linker.cluster_pairwise_at_threshold(0.90)
-frame.add_collection("splink_0.90", clusters=clusters_90)
+# Import into Starlings
+ef = sl.from_records("source", df)
+ef.add_collection("splink_output", edges=edges)
 
-comparison = frame.compare("splink_output", "splink_0.90")
-print(f"Agreement: {comparison['agreement']:.2%}")
+# Find optimal threshold using polars-inspired API
+sweep_results = ef.analyse(
+    sl.col("splink_output").sweep(0.5, 0.95, 0.01),
+    sl.col("ground_truth").at(1.0),
+    metrics=[sl.f1, sl.precision, sl.recall]
+)
+
+optimal_row = sweep_results.loc[sweep_results['f1'].idxmax()]
+print(f"Optimal threshold: {optimal_row['threshold']:.2f} (F1={optimal_row['f1']:.3f})")
 ```
 
 ### Integration with er-evaluation
 
 ```python
 import er_evaluation as er_eval
-import entityframe as ef
+import starlings as sl
 
-# Load data into EntityFrame
-frame = ef.EntityFrame()
-frame.load_records("dataset", records)
-frame.add_collection("predicted", clusters=predicted_clusters)
-frame.add_collection("truth", clusters=true_clusters)
+# Load data into Starlings
+ef = sl.from_records("dataset", records)
 
-# Use er-evaluation metrics
-metrics = er_eval.evaluate(
-    frame.get_partition("predicted", 0.85),
-    frame.get_partition("truth", 1.0)
+# Add collections
+ef.add_collection("predicted", edges=predicted_edges)
+ef.add_collection("truth", edges=true_edges)
+
+# Use Starlings's efficient sweep
+sweep_results = ef.analyse(
+    sl.col("predicted").sweep(0.5, 0.95),
+    sl.col("truth").at(1.0)
 )
 
-# Or use EntityFrame's built-in metrics
-metrics = frame.compare("predicted", "truth", threshold=0.85)
+# Or extract partition for er-evaluation
+partition = ef["predicted"].at(0.85)
+clusters = partition.to_list()
+metrics = er_eval.evaluate(clusters, true_clusters)
 ```
 
 ### Integration with Matchbox
 
 ```python
-import entityframe as ef
+import starlings as sl
 from matchbox import MatchboxClient
 
 # Get Matchbox results
 client = MatchboxClient()
 matches = client.get_matches(dataset_id)
 
-# Convert to EntityFrame
-frame = ef.EntityFrame()
-frame.add_collection("matchbox", edges=matches, num_records=n)
+# Convert to edges for Starlings
+edges = [(m['record_a'], m['record_b'], m['score']) for m in matches]
 
-# Export back to Matchbox format
-hierarchy = frame.get_collection("matchbox")
-matchbox_data = hierarchy.to_matchbox_format(threshold=0.9)
+# Create EntityFrame
+ef = sl.from_records("dataset", records)
+ef.add_collection("matchbox", edges=edges)
+
+# Find optimal threshold
+optimal_results = ef.analyse(
+    sl.col("matchbox").sweep(0.7, 0.95),
+    sl.col("truth").at(1.0),
+    metrics=[sl.f1]
+)
+optimal_threshold = optimal_results.loc[optimal_results['f1'].idxmax(), 'threshold']
+
+# Export with hashes at optimal threshold
+partition = ef["matchbox"].at(optimal_threshold)
+hashes = partition.map(sl.hash.sha256)
+
+matchbox_data = {
+    'entities': partition.to_list(),
+    'hashes': hashes,
+    'threshold': optimal_threshold
+}
 client.upload_results(matchbox_data)
 ```
 
@@ -509,23 +641,21 @@ client.upload_results(matchbox_data)
 ```python
 import pyarrow as pa
 import pyarrow.parquet as pq
-import entityframe as ef
+import starlings as sl
 
 # Save to Arrow/Parquet
-frame = ef.EntityFrame()
-# ... load data and collections ...
+ef = sl.from_records("source", data)
+# ... add collections ...
 
-arrow_table = frame.to_arrow()
-pq.write_table(arrow_table, "entityframe.parquet")
+arrow_table = ef.to_arrow()
+pq.write_table(arrow_table, "starlings_frame.parquet")
 
 # Load from Arrow/Parquet
-table = pq.read_table("entityframe.parquet")
-frame = ef.EntityFrame.from_arrow(table)
+table = pq.read_table("starlings_frame.parquet")
+ef = sl.EntityFrame.from_arrow(table)
 
-# Stream processing with Arrow
-reader = pa.ipc.RecordBatchStreamReader("entity_stream.arrow")
-for batch in reader:
-    frame.add_records_batch(batch)
+# The Arrow format uses dictionary encoding for efficiency
+# Sources and collection names are automatically deduplicated
 ```
 
 ## Implementation Roadmap
@@ -534,76 +664,79 @@ for batch in reader:
 **Goal**: Core functionality with single collection
 
 - Week 1-2: Rust core data structures
-  - InternedRecordStorage implementation
-  - Basic PartitionHierarchy with RoaringBitmaps
-  - Simple threshold queries
+  - Merge event storage implementation
+  - Basic hierarchy with reconstruction
+  - DataContext with append-only guarantee
   
 - Week 3-4: Python bindings
-  - PyO3 setup and basic API
-  - Load records from pandas/Arrow
-  - Create hierarchy from similarities
+  - PyO3 setup with starlings package
+  - Basic from_records and Collection.from_edges
+  - Collection.at() for partition access
   
 - Week 5-8: Essential algorithms
-  - Single-linkage clustering
+  - Connected components with merge event extraction
   - Basic metrics (precision, recall, F1)
-  - Threshold extraction
+  - Partition reconstruction from merges
   
-- Week 9-12: Testing and optimization
+- Week 9-12: Testing and optimisation
   - Comprehensive test suite
   - Performance benchmarks
   - Memory profiling
 
-**Deliverable**: Working single-collection EntityFrame with Python API
+**Deliverable**: Working single-collection Starlings with basic Python API
 
-### Phase 2: Multi-Collection & Analytics (Months 4-6)
+### Phase 2: Multi-collection & Analytics (Months 4-6)
 **Goal**: Multiple collections and comprehensive metrics
 
 - Week 1-3: Multi-collection support
-  - Collection management in EntityFrame
-  - Cross-collection comparison
-  - Shared record storage
+  - EntityFrame with multiple collections
+  - DataContext sharing via Arc
+  - ef.analyse() with expressions
   
 - Week 4-6: Complete metrics suite
   - ARI, NMI, V-measure implementation
-  - B-cubed metrics
-  - Lazy computation framework
+  - B-cubed metrics (semi-incremental)
+  - Injectable metric functions
   
 - Week 7-9: Incremental computation
-  - Metric caching system
-  - Incremental updates between thresholds
+  - Metric state tracking between thresholds
+  - O(k) updates for adjacent thresholds
   - Computation statistics
   
 - Week 10-12: Analysis tools
-  - Threshold sweep optimization
-  - Stability analysis
+  - Threshold sweep optimisation
+  - Collection.sweep() implementation
   - Entity lifetime tracking
 
 **Deliverable**: Full multi-collection comparison capabilities
 
-### Phase 3: Scale & Performance (Months 7-9)
-**Goal**: Production-ready performance
+### Phase 3: Batch Performance Optimisation (Months 7-9)
+**Goal**: Production-ready batch processing performance
 
-- Week 1-3: Parallelization
+- Week 1-3: Parallelisation
   - Rayon integration
-  - Parallel hierarchy construction
+  - Parallel merge event extraction
   - Concurrent collection comparison
+  - partition.map() with parallel built-ins
   
-- Week 4-6: SIMD optimizations
-  - Vectorized metric computation
+- Week 4-6: SIMD optimisations
+  - Vectorised metric computation
   - SIMD-accelerated set operations
-  - Cache-optimized layouts
+  - Cache-optimised layouts
+  - Built-in hash operations (SHA256, BLAKE3)
   
-- Week 7-9: Sparse optimizations
-  - Sparse contingency tables
-  - Block-based processing
-  - Memory-mapped storage
+- Week 7-9: Memory optimisation
+  - Automatic compaction on ef.drop()
+  - Collection.copy() for view detachment
+  - Memory-mapped storage for large datasets
+  - Optional quantisation support
   
-- Week 10-12: Streaming support
-  - Incremental record addition
-  - Online hierarchy updates
-  - Bounded memory streaming
+- Week 10-12: Batch processing enhancements
+  - Optimised cache strategies
+  - Batch comparison operations
+  - Performance profiling and tuning
 
-**Deliverable**: 10-100x performance improvement over baseline
+**Deliverable**: 10-100x performance improvement for batch operations
 
 ### Phase 4: Integration & Polish (Months 10-12)
 **Goal**: Ecosystem integration and production features
@@ -611,12 +744,12 @@ for batch in reader:
 - Week 1-3: Tool integrations
   - Splink adapter
   - er-evaluation compatibility
-  - Matchbox export/import
+  - Matchbox export/import with hashing
   
 - Week 4-6: Advanced features
-  - Distributed processing support
-  - GPU acceleration experiments
   - Custom metric plugins
+  - Collection.from_entities() and from_merge_events()
+  - Advanced Arrow serialisation
   
 - Week 7-9: Production tooling
   - Monitoring and metrics
@@ -624,12 +757,12 @@ for batch in reader:
   - Configuration management
   
 - Week 10-12: Documentation & release
-  - Complete API documentation
+  - Complete API documentation  
   - Tutorial notebooks
   - Performance guides
   - v1.0 release preparation
 
-**Deliverable**: Production-ready EntityFrame 1.0
+**Deliverable**: Production-ready Starlings 1.0
 
 ## Performance Benchmarks
 
@@ -637,71 +770,85 @@ for batch in reader:
 
 ```yaml
 # Single machine performance targets
-small_scale:  # 10K records
+# Note: Assumes sparse graphs from blocking (m ~ n to n log n)
+
+small_scale:  # 10K records, ~50K edges
   hierarchy_build: < 100ms
-  threshold_query: < 1ms
-  full_comparison: < 10ms
+  cached_query: < 1ms
+  uncached_query: < 10ms
+  full_sweep_1000_thresholds: < 1s
   memory_usage: < 10MB
 
-medium_scale:  # 1M records
+medium_scale:  # 1M records, ~5M edges
   hierarchy_build: < 10s
-  threshold_query: < 100ms
-  full_comparison: < 1s
-  memory_usage: < 1GB
+  cached_query: < 1ms
+  uncached_query: < 200ms
+  full_sweep_1000_thresholds: < 30s
+  memory_usage: < 100MB
 
-large_scale:  # 100M records
-  hierarchy_build: < 30min
-  threshold_query: < 1s
-  full_comparison: < 30s
-  memory_usage: < 100GB
+large_scale:  # 10M records, ~50M edges
+  hierarchy_build: < 5min
+  cached_query: < 10ms
+  uncached_query: < 2s
+  full_sweep_1000_thresholds: < 5min
+  memory_usage: < 1GB
 
 # Scaling characteristics
 complexity:
-  hierarchy_construction: O(n² log n) worst, O(n log n) typical
-  threshold_query: O(n)
-  metric_computation: O(n²) worst, O(k) incremental
-  memory: O(n × m) where m = unique thresholds
+  hierarchy_construction: O(m log m) where m = edges
+  partition_reconstruction: O(m)
+  cached_query: O(1)
+  incremental_metric: O(k) where k = affected entities
+  memory: O(m) for merge events + O(c × n) for c cached partitions
 ```
 
 ### Benchmark Suite
 
 ```python
 # Performance testing harness
-import entityframe as ef
+import starlings as sl
 import time
 import memory_profiler
 
-class EntityFrameBenchmark:
-    def __init__(self, num_records, num_sources=5):
+class StarlingsBenchmark:
+    def __init__(self, num_records, num_edges):
         self.num_records = num_records
-        self.num_sources = num_sources
-        self.frame = ef.EntityFrame()
+        self.num_edges = num_edges
         
     def benchmark_hierarchy_build(self):
-        similarities = self.generate_similarities()
+        edges = self.generate_edges()
         start = time.time()
-        hierarchy = ef.Hierarchy.from_similarities(similarities)
+        collection = sl.Collection.from_edges(edges, self.num_records)
         return time.time() - start
     
-    def benchmark_threshold_sweep(self, hierarchy, num_thresholds=100):
+    def benchmark_partition_reconstruction(self, collection):
+        # Clear cache to force reconstruction
+        collection.clear_cache()
         start = time.time()
-        for t in np.linspace(0, 1, num_thresholds):
-            partition = hierarchy.at_threshold(t)
+        partition = collection.at(0.85)
         return time.time() - start
     
-    def benchmark_comparison(self, col_a, col_b):
+    def benchmark_cached_access(self, collection):
+        # Warm cache
+        _ = collection.at(0.85)
+        # Measure cached access
         start = time.time()
-        metrics = self.frame.compare(col_a, col_b, threshold=0.85)
+        partition = collection.at(0.85)
         return time.time() - start
     
-    def run_full_benchmark(self):
-        results = {
-            'hierarchy_build': self.benchmark_hierarchy_build(),
-            'threshold_sweep': self.benchmark_threshold_sweep(),
-            'comparison': self.benchmark_comparison(),
-            'memory_mb': self.measure_memory_usage()
-        }
-        return results
+    def benchmark_threshold_sweep(self, ef):
+        start = time.time()
+        results = ef.analyse(
+            sl.col("test").sweep(0, 1, 0.001),
+            sl.col("truth").at(1.0)
+        )
+        return time.time() - start
+    
+    def benchmark_entity_hashing(self, collection):
+        partition = collection.at(0.85)
+        start = time.time()
+        hashes = partition.map(sl.hash.blake3)
+        return time.time() - start
 ```
 
 ## Migration Guide
@@ -716,16 +863,22 @@ def resolve_entities(df, threshold):
         clusters.append(cluster_at_threshold(df, t))
     return clusters[threshold]
 
-# After: EntityFrame with full hierarchy
-frame = ef.EntityFrame()
-frame.load_records("data", df)
-hierarchy = ef.Hierarchy.from_similarities(compute_similarities(df))
-frame.add_collection("resolved", hierarchy=hierarchy)
+# After: Starlings with full hierarchy
+import starlings as sl
 
-# Now can query any threshold instantly
-partition_70 = frame.get_partition("resolved", 0.7)
-partition_85 = frame.get_partition("resolved", 0.85)
-partition_92 = frame.get_partition("resolved", 0.92)
+ef = sl.from_records("data", df)
+edges = compute_edges(df)  # Your existing edge computation
+ef.add_collection("resolved", edges=edges)
+
+# Now can query any threshold instantly (after first reconstruction)
+partition = ef["resolved"].at(0.7)  # O(m) first time, O(1) after
+partition = ef["resolved"].at(0.85)  # O(1) if cached
+
+# Efficient sweep with incremental updates
+results = ef.analyse(
+    sl.col("resolved").sweep(0.5, 0.95),
+    sl.col("truth").at(1.0)
+)  # O(k) between thresholds
 ```
 
 ### From Multiple Resolution Attempts
@@ -736,16 +889,36 @@ splink_results = run_splink(data, params1)
 dedupe_results = run_dedupe(data, params2)
 comparison = compare_results(splink_results, dedupe_results, truth)
 
-# After: Unified EntityFrame
-frame = ef.EntityFrame()
-frame.load_records("data", data)
-frame.add_collection("splink", splink_results)
-frame.add_collection("dedupe", dedupe_results)
-frame.add_collection("truth", truth)
+# After: Unified Starlings
+import starlings as sl
 
-# Compare everything systematically
-for threshold in np.arange(0.5, 1.0, 0.01):
-    splink_metrics = frame.compare("splink", "truth", threshold)
-    dedupe_metrics = frame.compare("dedupe", "truth", threshold)
-    # ... analysis ...
+ef = sl.from_records("data", data)
+
+# Add as edges, not clusters
+ef.add_collection("splink", edges=splink_edges)
+ef.add_collection("dedupe", edges=dedupe_edges)
+ef.add_collection("truth", edges=truth_edges)
+
+# Compare systematically using expressions
+comparison = ef.analyse(
+    sl.col("splink").at(0.85),
+    sl.col("dedupe").at(0.76),
+    sl.col("truth").at(1.0),
+    metrics=[sl.f1, sl.precision, sl.recall]
+)
+
+# Find optimal thresholds efficiently
+splink_sweep = ef.analyse(
+    sl.col("splink").sweep(0.5, 0.95),
+    sl.col("truth").at(1.0)
+)
+optimal = splink_sweep.loc[splink_sweep['f1'].idxmax()]
 ```
+
+### Important Notes on Performance
+
+1. **First partition access**: Reconstructs from merge events O(m)
+2. **Subsequent accesses**: Use cache O(1)
+3. **Threshold sweeps**: Use incremental updates O(k) between adjacent thresholds
+4. **Memory usage**: ~25MB for 1M edges with DataContext architecture
+5. **Sparse graphs assumed**: Starlings expects m << n² from blocking/LSH

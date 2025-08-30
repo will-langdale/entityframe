@@ -114,7 +114,7 @@ class TestScalingBenchmarks:
             assert len(collection) == count
             entity = collection[0]
             assert "hash" in entity["metadata"]
-    
+
     @pytest.mark.slow
     def test_memory_scaling_efficiency(self):
         """Test memory efficiency doesn't degrade with scale."""
