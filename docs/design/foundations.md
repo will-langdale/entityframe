@@ -1,29 +1,29 @@
-# EntityFrame Design Document A: Core Design & Mathematics
+# Starlings Design Document A: Core Design & Mathematics
 
 ## Executive Summary
 
-EntityFrame represents a paradigm shift in entity resolution infrastructure. **Rather than forcing threshold decisions at processing time, EntityFrame captures the complete hierarchical structure of entity formation, enabling instant exploration of the entire resolution space.** This revolutionary approach achieves 10-100x performance improvements for threshold analysis while providing unprecedented insight into entity stability and formation patterns.
+Starlings represents a paradigm shift in entity resolution infrastructure. **Rather than forcing threshold decisions at processing time, Starlings captures the complete hierarchical structure of entity formation, enabling instant exploration of the entire resolution space.** This revolutionary approach achieves 10-100x performance improvements for threshold analysis while providing unprecedented insight into entity stability and formation patterns.
 
-The framework's core innovation lies in representing entity resolution outputs as hierarchical structures that generate partitions at any threshold. This enables O(k) incremental metric computation across thresholds (where k = affected entities), O(m) storage for infinite threshold granularity (where m = number of edges), and natural support for entity data at any confidence level. By storing the complete resolution space, EntityFrame becomes the universal transport format for entity resolution - preserving all information needed for downstream analysis and decision-making.
+The framework's core innovation lies in representing entity resolution outputs as hierarchical structures that generate partitions at any threshold. This enables O(k) incremental metric computation across thresholds (where k = affected entities), O(m) storage for infinite threshold granularity (where m = number of edges), and natural support for entity data at any confidence level. By storing the complete resolution space, Starlings becomes the universal transport format for entity resolution - preserving all information needed for downstream analysis and decision-making.
 
-EntityFrame supports multiple collections within a single frame, enabling direct comparison of different resolution approaches. Each collection is a hierarchy representing one attempt at resolving the same underlying records, whether from different algorithms, parameter settings, or confidence thresholds. This multi-collection architecture is fundamental to EntityFrame's value proposition: finding optimal resolution strategies through systematic comparison.
+Starlings supports multiple collections within a single frame, enabling direct comparison of different resolution approaches. Each collection is a hierarchy representing one attempt at resolving the same underlying records, whether from different algorithms, parameter settings, or confidence thresholds. This multi-collection architecture is fundamental to Starlings's value proposition: finding optimal resolution strategies through systematic comparison.
 
 ## Core Design Principles
 
 ### Incremental computation: no work thrown away
-Every computation in EntityFrame builds upon previous work. When moving between thresholds, we update only what changes rather than recomputing from scratch. This principle drives our O(k) metric updates (where k = affected entities) and makes complete threshold analysis computationally feasible.
+Every computation in Starlings builds upon previous work. When moving between thresholds, we update only what changes rather than recomputing from scratch. This principle drives our O(k) metric updates (where k = affected entities) and makes complete threshold analysis computationally feasible.
 
 ### Hierarchy generates partitions
 The hierarchy is not a fixed clustering but a generative structure. At any threshold, it produces a complete partition of records into entities. This distinction is fundamental - we store relationships and transformations, not just states.
 
 ### Multiple collections, shared records
-EntityFrame can hold multiple resolution attempts (collections) over the same record space. Collections share the underlying record storage but maintain independent hierarchies, enabling efficient comparison and analysis across different resolution strategies.
+Starlings can hold multiple resolution attempts (collections) over the same record space. Collections share the underlying record storage but maintain independent hierarchies, enabling efficient comparison and analysis across different resolution strategies.
 
 ### Lazy evaluation with caching
 Expensive operations are computed only when needed and cached for reuse. Simple statistics (sizes, counts) are pre-computed; complex metrics (Jaccard, NMI) are computed on demand. This balances memory usage with computational efficiency.
 
 ### Information preservation
-The hierarchy preserves all information needed for threshold decisions. Users can explore the complete resolution space without information loss, making EntityFrame ideal for collaboration and decision deferral.
+The hierarchy preserves all information needed for threshold decisions. Users can explore the complete resolution space without information loss, making Starlings ideal for collaboration and decision deferral.
 
 ### Optimised simplicity
 We choose simple, correct solutions and optimise them using Rust's low-level control. RoaringBitmaps for set operations, sparse matrices where naturally sparse, SIMD where beneficial - but no premature optimisation that adds complexity without clear benefit.
@@ -90,6 +90,7 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Compatible data formats
 - Pythonic API via PyO3
 - Integration with existing workflows
+- Starlings enters the entity resolution pipeline after pairwise scoring but before threshold selection
 
 **10. Multi-source resolution**
 *"Resolve entities across CRM, mailing lists, and other heterogeneous sources"*
@@ -164,14 +165,14 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 
 **Core representation: multiple hierarchies, shared records**
 
-EntityFrame fundamentally supports multiple entity collections over a shared record space. This enables direct comparison of different resolution attempts without duplicating data.
+Starlings fundamentally supports multiple entity collections over a shared record space. This enables direct comparison of different resolution attempts without duplicating data.
 
 An EntityFrame `F` is formally defined as: `F = (R, {H₁, H₂, ..., Hₙ}, I)` where:
 - `R` is the shared set of records across all collections
 - `Hᵢ` are the hierarchical structures (collections ARE hierarchies)
 - `I` is the interning system for efficient reference storage
 
-Each hierarchy `Hᵢ` represents a complete entity resolution attempt over the record space `R`.
+Each hierarchy `Hᵢ` represents a complete entity resolution attempt over the record space `R`. Collections can be constructed from three input formats: weighted edges (the most common), pre-resolved entity sets, or previously computed merge events for resuming work.
 
 ### Entity Representation: Sets of Interned References
 
@@ -195,7 +196,7 @@ E_customer = {
 
 **Interning for space efficiency**
 
-To prevent explosive growth in string storage, EntityFrame interns all source identifiers:
+To prevent explosive growth in string storage, Starlings interns all source identifiers:
 - Source names are mapped to small integers: "CRM" → 0, "MailingList" → 1
 - References become compact tuples: (0, 1), (0, 9), (1, 17), (2, 42)
 - Typical compression: 80-90% reduction in memory usage
@@ -218,7 +219,7 @@ Each collection's hierarchy `H` consists of partition levels: `H = {(t₁, P₁)
 
 **Threshold-based connected components approach**
 
-EntityFrame uses threshold-based connected components to build hierarchies from pairwise similarities. This is algorithmically equivalent to single-linkage clustering but more natural for entity resolution:
+Starlings uses threshold-based connected components to build hierarchies from pairwise similarities. This is algorithmically equivalent to single-linkage clustering but more natural for entity resolution. Starlings requires all pairwise relationships to be expressed as similarity scores in [0,1], where higher values indicate stronger matches. Distance metrics must be converted to similarities before ingestion.
 
 1. Given edges with similarities: `{(record_i, record_j, similarity)}`
 2. At threshold `t`, include all edges where `similarity ≥ t`
@@ -263,6 +264,10 @@ N_{ij}(t + Δt) = N_{ij}(t) + ΔN_{ij}
 ```
 
 This enables O(k) updates for metrics like ARI and NMI as we move between thresholds, where k is the number of affected entities.
+
+**Float precision and quantization**
+
+When constructing hierarchies from edges, float quantization requires explicit opt-in. This allows users to control the trade-off between precision and the number of distinct merge events in the hierarchy.
 
 ### Complete Mathematical Operation Space
 
@@ -323,7 +328,7 @@ Unique to hierarchical representation:
 
 **Cross-collection analysis**
 
-EntityFrame enables sophisticated comparison across collections. Importantly, thresholds are not comparable across different resolution methods - a 0.85 from one algorithm has no meaningful relationship to 0.85 from another due to different feature sets, modelling assumptions, and calibration.
+Starlings enables sophisticated comparison across collections. Importantly, thresholds are not comparable across different resolution methods - a 0.85 from one algorithm has no meaningful relationship to 0.85 from another due to different feature sets, modelling assumptions, and calibration.
 
 **Collection cuts**:
 A cut through a collection is denoted as `(collection_name, threshold)`, for example:
@@ -366,6 +371,22 @@ MI(C₁, t₁, C₂, t₂) = Σᵢⱼ p(i,j) log(p(i,j)/(p₁(i)p₂(j)))
 ```
 Mutual information between two collections at their respective thresholds.
 
+### Memory Architecture: Contextual Ownership
+
+**Solving the multi-collection memory challenge**
+
+To resolve the fundamental conflict between standalone collection encapsulation and efficient frame composition, Starlings employs a Contextual Ownership architecture. This model separates physical data storage from logical structure, leveraging an append-only data context for index stability and performance.
+
+**Core components**:
+- **DataContext**: An append-only arena containing record storage and string interning. Once a record is added, its index is immutable for the context's lifetime.
+- **Collections**: Lightweight logical views that hold an Arc<DataContext> reference and structural metadata (hierarchies) composed of indices valid within that context. Collections exist in two states: standalone (exclusively owning their DataContext) or view (sharing a DataContext with a parent EntityFrame).
+
+**Memory efficiency through sharing**:
+When collections are combined into an EntityFrame, they share the same DataContext through Arc reference counting. This eliminates duplication while maintaining the ability for collections to exist independently. The append-only nature guarantees index stability, enabling lock-free concurrent reads.
+
+**Automatic memory management**:
+When collections are removed from a frame, automatic compaction can reclaim unused space when garbage exceeds a threshold. This happens transparently without user intervention, maintaining the simplicity of the user-facing API while ensuring long-term memory efficiency. Float quantization can be explicitly enabled during hierarchy construction to reduce the number of distinct threshold levels, trading precision for memory efficiency.
+
 ### Theoretical Guarantees
 
 **Computational complexity**
@@ -386,8 +407,8 @@ Mutual information between two collections at their respective thresholds.
 
 **Practical scalability assumptions**
 
-EntityFrame is designed for realistic entity resolution scenarios where:
+Starlings is designed for realistic entity resolution scenarios where:
 - Edge lists are sparse due to blocking/LSH preprocessing
 - m (number of edges) is O(n) to O(n log n), not O(n²)
 - For 1M records, we expect 1-10M edges, not 1 trillion
-- If your blocking produces dense graphs approaching O(n²), the problem lies in the blocking strategy, not EntityFrame
+- If your blocking produces dense graphs approaching O(n²), the problem lies in the blocking strategy, not Starlings

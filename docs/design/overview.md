@@ -1,102 +1,101 @@
-# EntityFrame Design Documents Overview
+# Starlings Design Documents Overview
 
-## The Problem: Entity Resolution Needs Better Infrastructure
+## What is Starlings?
 
-Entity resolution produces rich hierarchical relationships between records, but the field lacks a unified data structure to:
-- **Analyze**: Compare different resolution methods systematically
-- **Represent**: Store complete resolution information without premature decisions
-- **Transport**: Share results between teams, tools, and stages of processing
+Starlings is a data structure for entity resolution that stores hierarchical merge events instead of fixed clusters. This design choice enables efficient threshold exploration, comprehensive metric computation, and lossless data transport between pipeline stages.
 
-Current approaches force threshold decisions too early, lose information between pipeline stages, and make it impossible to compare outputs from different methods. EntityFrame provides the foundational data structure to solve all three problems.
+## The Core Insight: Merge Events, Not Partitions
 
-## Core Architecture: Merge Events as Universal Representation
+Traditional entity resolution tools force you to choose a threshold and compute clusters at that point. To explore different thresholds, you recompute from scratch each time. Starlings takes a different approach:
 
-EntityFrame stores entity resolution outputs as sequences of merge events - the fundamental transitions that occur as similarity thresholds change. This representation serves as:
+```python
+# Traditional: Fixed clusters at each threshold
+clusters_at_85 = compute_clusters(edges, 0.85)  # Full computation
+clusters_at_90 = compute_clusters(edges, 0.90)  # Full computation again
 
-- **Analysis substrate**: O(k) incremental metric computation between thresholds
-- **Complete representation**: All possible partitions recoverable from ~50-250MB of merge events (vs ~10GB if stored explicitly)
-- **Transport format**: Preserves full resolution information for downstream decisions
-
+# Starlings: Hierarchy generates any threshold
+hierarchy = sl.Collection.from_edges(edges)
+partition_at_85 = hierarchy.at(0.85)  # O(m) first time, O(1) cached
+partition_at_90 = hierarchy.at(0.90)  # O(1) from cache
+partition_at_8739 = hierarchy.at(0.8739)  # Any threshold, instantly
 ```
-Pipeline Stage A → EntityFrame → Pipeline Stage B
-(Splink output)    (merge events)   (threshold selection)
-                         ↓
-                   Pipeline Stage C
-                   (quality analysis)
+
+By storing the merge events—the moments when entities combine as thresholds change—we can generate any partition on demand. This isn't possible with standard dataframe libraries because they lack this hierarchical concept.
+
+## Key Capabilities
+
+### Analyze: Efficient Threshold Exploration
+- Query any threshold without recomputation
+- Update metrics incrementally (O(k) where k = affected entities)
+- Compare multiple resolution methods systematically
+- Sweep thousands of thresholds in seconds, not hours
+
+### Represent: Complete Resolution Space
+- Store infinite thresholds in ~50-250MB (vs ~10GB for explicit storage)
+- Support n-way merges naturally (when 5 entities merge simultaneously)
+- Preserve all information for downstream decisions
+- Handle both probabilistic scores and fixed clusters uniformly
+
+### Transport: Seamless Integration
+- Arrow format with dictionary encoding for efficient serialization
+- Clean decomposition to relational database tables
+- Native adapters for Splink, er-evaluation, Matchbox
+- Preserve complete resolution history across pipeline stages
+
+## API Design
+
+The API borrows from Polars' expression-based approach, separating data containers from operations:
+
+```python
+import starlings as sl
+
+# Load data and add resolution attempts
+ef = sl.from_records("customers", df)
+ef.add_collection("splink", edges=splink_edges)
+ef.add_collection("dedupe", edges=dedupe_edges)
+ef.add_collection("truth", edges=truth_edges)
+
+# Analyze with composable expressions
+results = ef.analyse(
+    sl.col("splink").sweep(0.5, 0.95, 0.01),
+    sl.col("truth").at(1.0),
+    metrics=[sl.f1, sl.precision, sl.recall]
+)
+
+# Direct access for simple operations
+partition = ef["splink"].at(0.85)
+entities = partition.to_list()
 ```
+
+## Technical Implementation
+
+### Memory Architecture
+Collections use contextual ownership—they own their data when standalone, but share efficiently when combined in frames. This provides the simplicity of independent objects with the efficiency of shared storage.
+
+### Performance Characteristics
+- **Construction**: O(m log m) where m = number of edges
+- **Threshold query**: O(m) first time, O(1) when cached
+- **Metric updates**: O(k) incremental between adjacent thresholds
+- **Memory usage**: ~50-250MB for 1M edges
+
+### Language Stack
+- **Rust core**: For performance-critical merge event processing
+- **Python interface**: For familiar data science workflows
+- **Arrow integration**: For cross-language data transport
 
 ## Document Structure
 
 ### [Document A: Core Design & Mathematics](foundations.md)
-**The Foundation**
-
-Establishes EntityFrame as the universal container for entity resolution:
-- Multi-collection model: F = (R, {H₁, H₂, ..., Hₙ}, I) 
-- Collections ARE hierarchies (even fixed clusters at threshold 1.0)
-- 19 user stories covering analysis, transport, and integration needs
-- Mathematical framework for correctness and performance guarantees
+Establishes the mathematical foundations, user requirements, and theoretical guarantees. Defines the multi-collection model and proves the efficiency of incremental computation.
 
 ### [Document B: Technical Implementation](implementation.md)
-**The Engine**
-
-Optimized Rust implementation for production scale:
-- **Memory efficiency**: String interning, RoaringBitmaps, sparse structures
-- **Performance**: Parallel processing, SIMD operations, smart caching
-- **Flexibility**: Dual processing model (Rust built-ins + Python extensions)
-- **Integration**: PyO3 bindings, Arrow serialization, monitoring hooks
+Details the Rust implementation, including the contextual ownership architecture, parallel processing strategies, and Python bindings via PyO3.
 
 ### [Document C: Reference Architecture](reference.md)
-**The Interface**
+Complete API specification, integration examples, and performance benchmarks. Provides migration guides and practical usage patterns.
 
-Complete specification for users and integrators:
-- **Unified API**: Single data model for all resolution types
-- **Tool adapters**: Splink, er-evaluation, Matchbox integrations
-- **Transport protocols**: Arrow/Parquet for cross-system compatibility
-- **Production guidance**: Benchmarks, deployment patterns, migration paths
+## Why This Matters
 
-## Why EntityFrame Is The Right Foundation
+Entity resolution practitioners currently work with incomplete information, forced to make threshold decisions before understanding their impact. Starlings provides the missing abstraction: a data structure that preserves the complete resolution space efficiently.
 
-### For Analysis
-- Compare any two resolution methods at any thresholds
-- Sweep 1000 thresholds in seconds, not hours
-- Track entity stability and formation patterns
-- Compute standard metrics (ARI, NMI, B-cubed) incrementally
-
-### For Representation
-- Store complete resolution space in minimal memory
-- Defer threshold decisions until sufficient information available
-- Support heterogeneous data sources and ID types
-- Handle both probabilistic scores and fixed clusters uniformly
-
-### For Transport
-- Share resolution outputs without information loss
-- Enable pipeline stages to operate independently
-- Preserve provenance and enable reproducibility
-- Support batch processing at million-record scale
-
-## Key Design Principles
-
-1. **Information preservation**: Never force premature threshold decisions
-2. **Incremental computation**: Reuse work between adjacent thresholds
-3. **Universal representation**: One format for all entity resolution outputs
-4. **Production reality**: Optimize for sparse graphs from real blocking strategies
-
-## The Value Proposition
-
-EntityFrame transforms entity resolution from isolated threshold decisions into a continuous exploration space. It's the difference between:
-
-**Without EntityFrame**: Each tool/stage makes irreversible decisions
-```
-Blocking → Matching → Clustering → Analysis
-   ↓          ↓           ↓            ↓
-(loses)    (loses)     (loses)    (too late)
-```
-
-**With EntityFrame**: Preserve everything, decide later
-```
-Blocking → Matching → EntityFrame → Any threshold
-                           ↓         Any comparison  
-                      (preserves all) Any transport
-```
-
-By providing a single, optimized data structure for the complete entity resolution lifecycle, EntityFrame enables systematic analysis, lossless representation, and seamless transport of resolution results across tools and teams.
+This isn't about revolutionizing the field—it's about providing a better tool for a specific problem. If you need to systematically explore thresholds, compare resolution methods, or preserve resolution information across pipeline stages, Starlings offers a purpose-built solution that traditional dataframe libraries cannot provide.

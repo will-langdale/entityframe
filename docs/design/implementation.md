@@ -1,33 +1,35 @@
-# EntityFrame Design Document B: Technical Implementation
+# Starlings Design Document B: Technical Implementation
 
 ## Layer 2: Computer Science Techniques
 
 ### Core Data Structure Architecture
 
-**Multi-collection EntityFrame structure**
+**Multi-collection EntityFrame with Contextual Ownership**
 
 ```rust
 pub struct EntityFrame {
-    // Multiple hierarchies (collections) sharing same record space
-    // Collections ARE hierarchies mathematically
-    collections: HashMap<CollectionId, PartitionHierarchy>,
+    // Shared data context (append-only arena)
+    context: Arc<DataContext>,
     
-    // Shared interned record storage
-    records: InternedRecordStorage,
+    // Multiple hierarchies (collections) over shared record space
+    collections: HashMap<CollectionId, PartitionHierarchy>,
     
     // Cross-collection comparison engine
     comparison_engine: CollectionComparer,
     
-    // Global string interning for sources
-    source_interner: StringInterner,
+    // Track garbage for automatic compaction
+    garbage_records: RoaringBitmap,
 }
 
-pub struct InternedRecordStorage {
-    // Map source names to compact IDs
+pub struct DataContext {
+    // Append-only record storage
+    records: Vec<InternedRecord>,
+    
+    // String interning for sources
     source_interner: StringInterner<FxHashMap>,
     
-    // Actual record data
-    records: Vec<InternedRecord>,
+    // Canonical identity mapping
+    identity_map: HashMap<(SourceId, Key), RecordIndex>,
     
     // Index for fast lookup
     source_index: HashMap<SourceId, RoaringBitmap>,
@@ -35,16 +37,64 @@ pub struct InternedRecordStorage {
 
 pub struct InternedRecord {
     source_id: u16,     // Interned source identifier
-    local_id: LocalId,  // ID within that source (flexible type)
+    key: Key,           // Key within that source (flexible type)
     attributes: Option<RecordData>,  // Optional attribute data
 }
 
 /// Flexible key types for record identification
-pub enum LocalId {
+pub enum Key {
     U32(u32),
     U64(u64),
     String(InternedString),
     Bytes(Vec<u8>),
+}
+```
+
+### Contextual Ownership Architecture
+
+**Separation of data and logic**
+
+```rust
+pub struct Collection {
+    // Reference to data (may be shared or owned)
+    context: Arc<DataContext>,
+    
+    // Logical structure (hierarchy of merge events)
+    hierarchy: PartitionHierarchy,
+    
+    // Track if this is a view from a frame
+    parent_frame: Option<Arc<EntityFrame>>,
+}
+
+impl Collection {
+    /// Create standalone collection with owned context
+    pub fn from_edges(edges: Vec<(Key, Key, f64)>) -> Self {
+        let context = Arc::new(DataContext::new());
+        // Populate context with records from edges
+        let hierarchy = build_hierarchy(edges, &context);
+        
+        Collection {
+            context,
+            hierarchy,
+            parent_frame: None,
+        }
+    }
+    
+    /// Copy-on-Write for mutations
+    pub fn add_edges(&mut self, new_edges: Vec<(Key, Key, f64)>) {
+        // Atomic check for unique ownership
+        if let Some(context) = Arc::get_mut(&mut self.context) {
+            // We own the context, mutate in place
+            context.append_records(/* ... */);
+        } else {
+            // Shared context, trigger CoW to create owned collection
+            let new_context = Arc::new(self.context.deep_copy());
+            self.context = new_context;
+            self.parent_frame = None;  // Now standalone with owned DataContext
+            // Now safe to mutate
+            Arc::get_mut(&mut self.context).unwrap().append_records(/* ... */);
+        }
+    }
 }
 ```
 
@@ -57,7 +107,7 @@ pub struct PartitionHierarchy {
     // Primary: Merge events sorted by threshold (descending)
     merges: Vec<MergeEvent>,
     
-    // Secondary: Cache for frequently accessed partitions (per collection)
+    // Secondary: Cache for frequently accessed partitions
     partition_cache: LruCache<OrderedFloat<f64>, PartitionLevel>,
     
     // Tertiary: State for incremental metric computation
@@ -106,74 +156,93 @@ pub struct IncrementalMetricState {
 
 **Memory analysis**
 
-For 1M records with 1M edges:
+For 1M records with 1M edges in the Contextual Ownership model:
+- DataContext: ~10MB for records + interning
 - Merge events: 1M × 50-100 bytes = 50-100MB (includes RoaringBitmaps)
 - LRU cache (10 partitions): 10 × 500KB = 5MB
-- Total: ~50-250MB vs ~10GB for full materialization
-- Tradeoff: O(m) reconstruction cost for uncached queries
+- Total per collection: ~60-115MB
+- Shared context when in frame: No duplication
+- Total for 5 collections in frame: ~300-500MB (not 5× due to sharing)
 
-### String Interning Architecture
+### Assimilation Process
 
-**Multi-level interning strategy**
+**Adding collections to frames**
 
 ```rust
-use string_interner::{StringInterner, DefaultSymbol};
-
-pub struct InternSystem {
-    // Source dataset names (e.g., "CRM", "MailingList")
-    source_interner: StringInterner<DefaultSymbol>,
-    
-    // Attribute names across all sources
-    attribute_interner: StringInterner<DefaultSymbol>,
-    
-    // Frequently occurring values (optional)
-    value_interner: Option<StringInterner<DefaultSymbol>>,
-}
-
-impl InternSystem {
-    pub fn intern_reference(&mut self, source: &str, local_id: u32) -> InternedRef {
-        let source_sym = self.source_interner.get_or_intern(source);
-        InternedRef {
-            source_id: source_sym.to_usize() as u16,
-            local_id,
+impl EntityFrame {
+    pub fn add_collection(&mut self, name: &str, collection: Collection) {
+        if Arc::ptr_eq(&collection.context, &self.context) {
+            // Same context, just add hierarchy
+            self.collections.insert(name.into(), collection.hierarchy);
+        } else {
+            // Different context, need assimilation
+            let translation = self.assimilate(collection);
+            self.collections.insert(name.into(), translation.hierarchy);
         }
     }
     
-    pub fn resolve_reference(&self, interned: InternedRef) -> (String, u32) {
-        let source = self.source_interner
-            .resolve(DefaultSymbol::from(interned.source_id as usize))
-            .unwrap()
-            .to_string();
-        (source, interned.local_id)
+    fn assimilate(&mut self, collection: Collection) -> AssimilatedCollection {
+        let mut translation_map = TranslationMap::new();
+        
+        // Identity resolution: (source, key) determines identity
+        for (idx, record) in collection.context.records.iter().enumerate() {
+            let identity = (record.source_id, &record.key);
+            
+            if let Some(&existing_idx) = self.context.identity_map.get(&identity) {
+                // Record exists, map to existing
+                translation_map.insert(idx, existing_idx);
+            } else {
+                // New record, append to context
+                let new_idx = self.context.records.len();
+                self.context.records.push(record.clone());
+                self.context.identity_map.insert(identity, new_idx);
+                translation_map.insert(idx, new_idx);
+            }
+        }
+        
+        // Translate hierarchy to use new indices
+        let mut new_hierarchy = collection.hierarchy.clone();
+        new_hierarchy.translate_indices(&translation_map);
+        
+        AssimilatedCollection {
+            hierarchy: new_hierarchy,
+            translation_map,
+        }
     }
 }
 ```
 
-**Compression results**
-- Source names: 20-30 bytes → 2 bytes (93% reduction)
-- References: (String, u32) ~24 bytes → 6 bytes (75% reduction)
-- Total memory: 80-90% reduction for typical workloads
-
 ### Connected Components Algorithm for Hierarchy Construction
 
-**Union-find based merge event extraction**
+**Union-find based merge event extraction with quantization support**
 
 ```rust
 use disjoint_sets::UnionFind;
 
 impl PartitionHierarchy {
-    pub fn from_edges(edges: Vec<(u32, u32, f64)>, num_records: u32, cache_size: usize) -> Self {
+    pub fn from_edges(edges: Vec<(u32, u32, f64)>, 
+                     num_records: u32, 
+                     quantize: Option<u32>) -> Self {
+        // Optional quantization
+        let mut sorted_edges = if let Some(decimals) = quantize {
+            let factor = 10_f64.powi(decimals as i32);
+            edges.into_iter()
+                .map(|(i, j, w)| (i, j, (w * factor).round() / factor))
+                .collect()
+        } else {
+            edges
+        };
+        
         // Sort edges by weight (descending) - O(m log m)
-        let mut sorted_edges = edges;
         sorted_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
         
-        // Group edges by threshold
+        // Group edges by threshold (handles quantization naturally)
         let mut threshold_groups: Vec<(f64, Vec<(u32, u32)>)> = Vec::new();
         let mut current_threshold = sorted_edges[0].2;
         let mut current_group = Vec::new();
         
         for (src, dst, weight) in sorted_edges {
-            if (weight - current_threshold).abs() < f64::EPSILON {
+            if weight == current_threshold {
                 current_group.push((src, dst));
             } else {
                 threshold_groups.push((current_threshold, current_group));
@@ -215,7 +284,7 @@ impl PartitionHierarchy {
                 uf.union(*src as usize, *dst as usize);
             }
             
-            // Create merge events
+            // Create merge events (handles n-way merges naturally)
             let mut processed = HashSet::new();
             for root in merging_groups.keys() {
                 if processed.contains(root) {
@@ -266,18 +335,11 @@ impl PartitionHierarchy {
         
         PartitionHierarchy {
             merges,
-            partition_cache: LruCache::new(cache_size),
+            partition_cache: LruCache::new(10),
             metric_state: None,
             threshold_index: Self::build_threshold_index(&merges),
-            cache_size,
+            cache_size: 10,
         }
-    }
-    
-    fn build_threshold_index(merges: &[MergeEvent]) -> BTreeMap<OrderedFloat<f64>, usize> {
-        merges.iter()
-            .enumerate()
-            .map(|(idx, merge)| (OrderedFloat(merge.threshold), idx))
-            .collect()
     }
 }
 ```
@@ -353,6 +415,60 @@ impl PartitionHierarchy {
 }
 ```
 
+### Automatic Memory Management
+
+**Compaction on collection removal**
+
+```rust
+impl EntityFrame {
+    pub fn drop(&mut self, name: &str) {
+        if let Some(hierarchy) = self.collections.remove(name) {
+            // Track which records were used by this collection
+            let collection_records = hierarchy.get_all_record_indices();
+            
+            // Mark as garbage
+            self.garbage_records.or_inplace(&collection_records);
+            
+            // Check if compaction needed
+            let garbage_ratio = self.garbage_records.cardinality() as f64 / 
+                              self.context.records.len() as f64;
+            
+            if garbage_ratio > 0.5 {
+                self.auto_compact();
+            }
+        }
+    }
+    
+    fn auto_compact(&mut self) {
+        // Find live records
+        let mut live_records = RoaringBitmap::new();
+        for hierarchy in self.collections.values() {
+            live_records.or_inplace(&hierarchy.get_all_record_indices());
+        }
+        
+        // Build new context with only live records
+        let mut new_context = DataContext::new();
+        let mut translation_map = TranslationMap::new();
+        
+        for &old_idx in live_records.iter() {
+            let record = &self.context.records[old_idx as usize];
+            let new_idx = new_context.records.len();
+            new_context.records.push(record.clone());
+            translation_map.insert(old_idx as usize, new_idx);
+        }
+        
+        // Update all hierarchies
+        for hierarchy in self.collections.values_mut() {
+            hierarchy.translate_indices(&translation_map);
+        }
+        
+        // Swap contexts
+        self.context = Arc::new(new_context);
+        self.garbage_records.clear();
+    }
+}
+```
+
 ### Lazy Metric Computation Framework
 
 **LazyMetric pattern implementation**
@@ -419,49 +535,6 @@ impl LazyMetricsCache {
             self.computation_stats.total_computations += 1;
             self.compute_from_scratch(metric, threshold, truth)
         }
-    }
-}
-```
-
-**Incremental computation chain**
-
-```rust
-impl PartitionHierarchy {
-    pub fn compute_metric_range(&mut self,
-                                start: f64,
-                                end: f64,
-                                step: f64,
-                                truth: &Self) -> Vec<(f64, Metrics)> {
-        let mut results = Vec::new();
-        let mut current_metrics = None;
-        let mut current_partition = None;
-        
-        for threshold in (0..)
-            .map(|i| start + i as f64 * step)
-            .take_while(|&t| t <= end) {
-            
-            // Get partition (from cache or reconstruct)
-            let partition = self.at_threshold(threshold);
-            
-            let metrics = if let Some(prev) = current_metrics {
-                // Update from previous - O(k) where k = affected entities
-                self.update_metrics_incremental(
-                    prev, 
-                    &current_partition.unwrap(),
-                    partition,
-                    truth
-                )
-            } else {
-                // Only compute from scratch once
-                self.compute_metrics_full(partition, truth)
-            };
-            
-            results.push((threshold, metrics.clone()));
-            current_metrics = Some(metrics);
-            current_partition = Some(partition.clone());
-        }
-        
-        results
     }
 }
 ```
@@ -630,6 +703,7 @@ impl PartitionHierarchy {
             partition_cache: LruCache::new(10),
             metric_state: None,
             threshold_index: Self::build_threshold_index(&merges),
+            cache_size: 10,
         }
     }
 }
@@ -746,23 +820,33 @@ fn compute_entity_hashes(partition: &PartitionLevel) -> Vec<[u8; 32]> {
 
 ### Arrow Integration
 
-**Hierarchical Arrow schema**
+**Hierarchical Arrow schema with dictionary encoding**
 
 ```rust
 use arrow::datatypes::{DataType, Field, Schema};
 
-pub fn create_entityframe_schema() -> Schema {
+pub fn create_starlings_schema() -> Schema {
     Schema::new(vec![
         // Collection metadata
         Field::new("collection_id", DataType::Utf8, false),
         
-        // Interned references
+        // Interned references with dictionary encoding
         Field::new("source_dictionary", DataType::Dictionary(
             Box::new(DataType::UInt16),
             Box::new(DataType::Utf8),
         ), false),
         
-        // Merge events (not full partitions)
+        // Records
+        Field::new("records", DataType::List(Box::new(DataType::Struct(vec![
+            Field::new("source", DataType::Dictionary(
+                Box::new(DataType::UInt16),
+                Box::new(DataType::Utf8),
+            ), false),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("record_index", DataType::UInt32, false),
+        ]))), false),
+        
+        // Merge events (expanded, not binary)
         Field::new("merge_events", DataType::List(Box::new(Field::new(
             "merge", 
             DataType::Struct(vec![
@@ -771,6 +855,9 @@ pub fn create_entityframe_schema() -> Schema {
                     Box::new(DataType::UInt32)
                 ), false),
                 Field::new("result_component", DataType::UInt32, false),
+                Field::new("affected_records", DataType::List(
+                    Box::new(DataType::UInt32)
+                ), false),
             ]), 
             false
         ))), false),
@@ -791,59 +878,82 @@ pub fn create_entityframe_schema() -> Schema {
 
 ### Core EntityFrame API
 
-**Multi-collection management**
+**Multi-collection management with contextual ownership**
 
 ```rust
 pub struct EntityFrame {
+    context: Arc<DataContext>,
     collections: HashMap<CollectionId, PartitionHierarchy>,
-    records: InternedRecordStorage,
-    interner: InternSystem,
-    analyzer: FrameAnalyzer,
+    comparison_engine: FrameAnalyzer,
+    garbage_records: RoaringBitmap,
 }
 
 impl EntityFrame {
-    pub fn new() -> Self {
+    pub fn from_records(source_name: &str, records: Vec<Record>) -> Self {
+        let mut context = DataContext::new();
+        let source_id = context.source_interner.get_or_intern(source_name);
+        
+        for record in records {
+            let key = Key::from(record.id);
+            context.records.push(InternedRecord {
+                source_id,
+                key,
+                attributes: Some(record.data),
+            });
+        }
+        
         EntityFrame {
+            context: Arc::new(context),
             collections: HashMap::new(),
-            records: InternedRecordStorage::new(),
-            interner: InternSystem::new(),
-            analyzer: FrameAnalyzer::new(),
+            comparison_engine: FrameAnalyzer::new(),
+            garbage_records: RoaringBitmap::new(),
         }
     }
     
     pub fn add_collection(&mut self, 
                          name: &str, 
-                         hierarchy: PartitionHierarchy) -> CollectionId {
+                         collection: Collection) -> CollectionId {
         let id = CollectionId::new(name);
-        self.collections.insert(id, hierarchy);
+        
+        // Assimilate if necessary
+        if !Arc::ptr_eq(&collection.context, &self.context) {
+            let assimilated = self.assimilate(collection);
+            self.collections.insert(id, assimilated.hierarchy);
+        } else {
+            self.collections.insert(id, collection.hierarchy);
+        }
+        
         id
     }
     
-    pub fn add_records_from_source(&mut self, 
-                                   source_name: &str,
-                                   records: Vec<Record>) -> Vec<RecordId> {
-        let source_id = self.interner.intern_source(source_name);
-        self.records.add_from_source(source_id, records)
+    pub fn get_collection(&self, name: &str) -> Collection {
+        // Return view that shares context
+        Collection {
+            context: self.context.clone(),
+            hierarchy: self.collections[&CollectionId::from(name)].clone(),
+            parent_frame: Some(Arc::new(self.clone())),
+        }
     }
     
-    pub fn compare_cuts(&mut self,
-                       cut_a: (&str, f64),
-                       cut_b: (&str, f64)) -> ComparisonResult {
-        let collection_a = &mut self.collections.get_mut(&CollectionId::from(cut_a.0)).unwrap();
-        let collection_b = &mut self.collections.get_mut(&CollectionId::from(cut_b.0)).unwrap();
-        
-        // Partitions may be cached or reconstructed
-        let partition_a = collection_a.at_threshold(cut_a.1);
-        let partition_b = collection_b.at_threshold(cut_b.1);
-        
-        self.analyzer.compare_partitions(partition_a, partition_b)
+    pub fn drop(&mut self, name: &str) {
+        if let Some(hierarchy) = self.collections.remove(name) {
+            let collection_records = hierarchy.get_all_record_indices();
+            self.garbage_records.or_inplace(&collection_records);
+            
+            // Auto-compact if needed
+            if self.garbage_records.cardinality() > self.context.records.len() / 2 {
+                self.auto_compact();
+            }
+        }
     }
 }
 ```
 
 ### Python Interface via PyO3
 
-**Core Python bindings**
+**Core Python bindings with starlings package**
+
+The Python API follows the polars-inspired expression design, providing a clear separation between data containers and operations through composable expressions.
 
 ```rust
 use pyo3::prelude::*;
@@ -855,25 +965,8 @@ pub struct PyEntityFrame {
 
 #[pymethods]
 impl PyEntityFrame {
-    #[new]
-    pub fn new() -> Self {
-        PyEntityFrame {
-            inner: Arc::new(Mutex::new(EntityFrame::new())),
-        }
-    }
-    
-    pub fn add_collection(&mut self, 
-                         name: &str, 
-                         py_hierarchy: PyObject) -> PyResult<String> {
-        let hierarchy = PartitionHierarchy::from_pyobject(py_hierarchy)?;
-        let mut frame = self.inner.lock().unwrap();
-        let id = frame.add_collection(name, hierarchy);
-        Ok(id.to_string())
-    }
-    
-    pub fn load_records(&mut self, 
-                       source: &str, 
-                       data: &PyAny) -> PyResult<usize> {
+    #[staticmethod]
+    pub fn from_records(source: &str, data: &PyAny) -> PyResult<Self> {
         // Handle pandas DataFrame, Arrow table, or list of dicts
         let records = if data.is_instance_of::<PyDataFrame>()? {
             records_from_dataframe(data)?
@@ -883,106 +976,188 @@ impl PyEntityFrame {
             records_from_list(data)?
         };
         
-        let mut frame = self.inner.lock().unwrap();
-        let ids = frame.add_records_from_source(source, records);
-        Ok(ids.len())
+        let frame = EntityFrame::from_records(source, records);
+        Ok(PyEntityFrame {
+            inner: Arc::new(Mutex::new(frame)),
+        })
     }
     
-    #[pyo3(text_signature = "($self, cut_a, cut_b)")]
-    pub fn compare(&mut self, 
-                   cut_a: PyCollectionCut,
-                   cut_b: PyCollectionCut) -> PyResult<PyDict> {
+    pub fn add_collection(&mut self, 
+                         name: &str, 
+                         edges: Option<Vec<(PyObject, PyObject, f64)>>,
+                         collection: Option<PyCollection>) -> PyResult<()> {
         let mut frame = self.inner.lock().unwrap();
         
-        // All cuts are now (name, threshold) tuples
-        let rust_cut_a = cut_a.to_rust()?;
-        let rust_cut_b = cut_b.to_rust()?;
+        if let Some(edges) = edges {
+            // Build collection from edges
+            let collection = Collection::from_edges(edges);
+            frame.add_collection(name, collection);
+        } else if let Some(collection) = collection {
+            // Add existing collection
+            frame.add_collection(name, collection.inner);
+        }
         
-        let result = frame.compare_cuts(rust_cut_a, rust_cut_b);
-        
-        // Convert to Python dict
-        let py_dict = PyDict::new();
-        py_dict.set_item("precision", result.precision)?;
-        py_dict.set_item("recall", result.recall)?;
-        py_dict.set_item("f1", result.f1)?;
-        py_dict.set_item("ari", result.ari)?;
-        py_dict.set_item("nmi", result.nmi)?;
-        Ok(py_dict)
-    }
-}
-
-// All collections now use (name, threshold) format
-struct PyCollectionCut {
-    name: String,
-    threshold: f64,
-}
-
-impl PyCollectionCut {
-    fn from_python(obj: &PyAny) -> PyResult<Self> {
-        let (name, threshold) = obj.extract::<(String, f64)>()?;
-        Ok(PyCollectionCut { name, threshold })
+        Ok(())
     }
     
-    fn to_rust(&self) -> PyResult<(&str, f64)> {
-        Ok((&self.name, self.threshold))
+    pub fn __getitem__(&self, name: &str) -> PyResult<PyCollection> {
+        let frame = self.inner.lock().unwrap();
+        let collection = frame.get_collection(name);
+        Ok(PyCollection { inner: collection })
+    }
+    
+    pub fn analyse(&mut self, 
+                  expressions: Vec<PyExpression>,
+                  metrics: Option<Vec<PyMetric>>) -> PyResult<PyObject> {
+        let mut frame = self.inner.lock().unwrap();
+        
+        // Parse expressions to determine operation type
+        let operation = parse_expressions(expressions)?;
+        
+        // Use default metrics if none provided
+        // sl.report defaults: [f1, precision, recall, ari, nmi] for comparisons
+        //                     [entity_count, entropy] for single collections
+        let metrics = metrics.unwrap_or_else(|| {
+            match &operation {
+                Operation::SingleCollection(_) => vec![PyMetric::EntityCount, PyMetric::Entropy],
+                Operation::Comparison(_) => vec![
+                    PyMetric::F1, 
+                    PyMetric::Precision, 
+                    PyMetric::Recall,
+                    PyMetric::ARI,
+                    PyMetric::NMI
+                ],
+                Operation::Sweep(_) => vec![
+                    PyMetric::F1, 
+                    PyMetric::Precision, 
+                    PyMetric::Recall,
+                    PyMetric::ARI,
+                    PyMetric::NMI
+                ],
+            }
+        });
+        
+        match operation {
+            Operation::PointComparison(cuts) => {
+                let result = frame.compare_cuts(cuts, metrics);
+                Python::with_gil(|py| Ok(result.to_pydict(py)))
+            },
+            Operation::Sweep(sweep_spec) => {
+                let result = frame.sweep(sweep_spec, metrics);
+                Python::with_gil(|py| Ok(result.to_dataframe(py)))
+            },
+        }
+    }
+    
+    // American spelling alias
+    pub fn analyze(&mut self, 
+                  expressions: Vec<PyExpression>,
+                  metrics: Option<Vec<PyMetric>>) -> PyResult<PyObject> {
+        self.analyse(expressions, metrics)
+    }
+    
+    pub fn drop(&mut self, names: Vec<&str>) -> PyResult<()> {
+        let mut frame = self.inner.lock().unwrap();
+        for name in names {
+            frame.drop(name);
+        }
+        Ok(())
     }
 }
-```
 
-**Python usage examples**
+#[pyclass]
+pub struct PyCollection {
+    inner: Collection,
+}
 
-```python
-import entityframe as ef
-import pandas as pd
+#[pymethods]
+impl PyCollection {
+    #[staticmethod]
+    pub fn from_edges(edges: Vec<(PyObject, PyObject, f64)>) -> PyResult<Self> {
+        let collection = Collection::from_edges(convert_edges(edges)?);
+        Ok(PyCollection { inner: collection })
+    }
+    
+    #[staticmethod]
+    pub fn from_entities(entities: Vec<HashSet<PyObject>>, 
+                        threshold: f64) -> PyResult<Self> {
+        let collection = Collection::from_entities(convert_entities(entities)?, threshold);
+        Ok(PyCollection { inner: collection })
+    }
+    
+    #[staticmethod]
+    pub fn from_merge_events(merges: Vec<PyDict>, 
+                            num_records: usize) -> PyResult<Self> {
+        let collection = Collection::from_merge_events(
+            convert_merges(merges)?, 
+            num_records
+        );
+        Ok(PyCollection { inner: collection })
+    }
+    
+    pub fn at(&mut self, threshold: f64) -> PyResult<PyPartition> {
+        let partition = self.inner.at_threshold(threshold)?;
+        Ok(PyPartition { inner: partition })
+    }
+    
+    pub fn copy(&self) -> PyResult<Self> {
+        let mut new_collection = self.inner.clone();
+        // Trigger CoW to detach and create owned collection with its own DataContext
+        new_collection.make_standalone();
+        Ok(PyCollection { inner: new_collection })
+    }
+}
 
-# Create frame and load data from multiple sources
-frame = ef.EntityFrame()
+// Expression API implementation
+#[pyclass]
+pub struct PyColExpression {
+    collection_name: String,
+}
 
-# Load records from different sources
-frame.load_records("CRM", pd.read_csv("crm_customers.csv"))
-frame.load_records("MailingList", pd.read_csv("mailing_list.csv"))
-frame.load_records("OrderSystem", pd.read_parquet("orders.parquet"))
+#[pymethods]
+impl PyColExpression {
+    pub fn at(&self, threshold: f64) -> PyExpression {
+        PyExpression::At(self.collection_name.clone(), threshold)
+    }
+    
+    pub fn sweep(&self, start: f64, stop: f64, step: f64) -> PyExpression {
+        PyExpression::Sweep(self.collection_name.clone(), start, stop, step)
+    }
+}
 
-# Add different resolution attempts as collections (all hierarchies)
-frame.add_collection("splink_output", splink_hierarchy)
-frame.add_collection("dedupe_output", dedupe_hierarchy)
-frame.add_collection("ground_truth", truth_hierarchy)  # Even "fixed" data is at threshold 1.0
+// Module definition
+#[pymodule]
+fn starlings(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<PyEntityFrame>()?;
+    m.add_class::<PyCollection>()?;
+    m.add_class::<PyPartition>()?;
+    m.add_class::<PyColExpression>()?;
+    
+    // Add metrics as module constants
+    m.add("f1", PyMetric::F1)?;
+    m.add("precision", PyMetric::Precision)?;
+    m.add("recall", PyMetric::Recall)?;
+    m.add("ari", PyMetric::ARI)?;
+    m.add("nmi", PyMetric::NMI)?;
+    
+    // Add col function
+    m.add_function(wrap_pyfunction!(col, m)?)?;
+    m.add_function(wrap_pyfunction!(from_records, m)?)?;
+    
+    Ok(())
+}
 
-# Compare collections at specific thresholds
-# Note: ALL comparisons now use (collection, threshold) format
-comparison = frame.compare(
-    ("splink_output", 0.85),
-    ("dedupe_output", 0.76)
-)
-print(f"Agreement: F1={comparison['f1']:.3f}")
+#[pyfunction]
+fn col(name: &str) -> PyColExpression {
+    PyColExpression {
+        collection_name: name.to_string(),
+    }
+}
 
-# Compare against "fixed" ground truth (at threshold 1.0)
-comparison = frame.compare(
-    ("splink_output", 0.85),
-    ("ground_truth", 1.0)  # Explicit threshold for all collections
-)
-print(f"Splink at 0.85: F1={comparison['f1']:.3f}")
-
-# Sweep thresholds to find optimal
-results = []
-for threshold in np.arange(0.5, 1.0, 0.01):
-    metrics = frame.compare(
-        ("splink_output", threshold),
-        ("ground_truth", 1.0)
-    )
-    results.append((threshold, metrics['f1']))
-
-optimal = max(results, key=lambda x: x[1])
-print(f"Optimal threshold: {optimal[0]:.2f} (F1={optimal[1]:.3f})")
-
-# Analyse specific entity
-entity = frame.get_entity("splink_output", 0.85, entity_id=42)
-for source, record_id in entity.members:
-    record = frame.get_record(source, record_id)
-    print(f"  {source}: {record}")
-
-# Export for further analysis
-frame.to_arrow("entity_analysis.arrow")
+#[pyfunction]
+fn from_records(source: &str, data: &PyAny) -> PyResult<PyEntityFrame> {
+    PyEntityFrame::from_records(source, data)
+}
 ```
 
 ### Batch Processing Optimisations
@@ -1002,7 +1177,11 @@ impl BatchProcessor {
         let chunks = edges.chunks(self.batch_size);
         
         for chunk in chunks {
-            let hierarchy = PartitionHierarchy::from_edges(chunk.collect(), self.num_records);
+            let hierarchy = PartitionHierarchy::from_edges(
+                chunk.collect(), 
+                self.num_records,
+                None  // No quantization by default
+            );
             // Process hierarchy...
         }
     }
@@ -1055,6 +1234,10 @@ pub struct FrameMetrics {
     // Quality indicators
     avg_entity_stability: f64,
     threshold_sensitivity: f64,
+    
+    // Memory management
+    garbage_ratio: f64,
+    last_compaction: Option<DateTime<Utc>>,
 }
 
 impl EntityFrame {
@@ -1068,18 +1251,24 @@ impl EntityFrame {
         
         FrameMetrics {
             num_collections: self.collections.len(),
-            num_records: self.records.len(),
-            num_sources: self.interner.num_sources(),
+            num_records: self.context.records.len(),
+            num_sources: self.context.source_interner.len(),
             total_memory_mb: self.estimate_memory_usage() / 1_048_576.0,
             avg_reconstruction_time_ms: cache_stats.avg_miss_time_ms,
             cache_hit_rate: cache_stats.hit_rate,
             incremental_computation_rate: self.compute_incremental_rate(),
             avg_entity_stability: self.compute_avg_stability(),
             threshold_sensitivity: self.compute_sensitivity(),
+            garbage_ratio: self.garbage_records.cardinality() as f64 / 
+                          self.context.records.len() as f64,
+            last_compaction: self.last_compaction_time,
         }
     }
     
     fn estimate_memory_usage(&self) -> f64 {
+        let context_memory = self.context.records.len() * 
+                           std::mem::size_of::<InternedRecord>();
+        
         let merge_memory: usize = self.collections
             .values()
             .map(|h| h.merges.len() * std::mem::size_of::<MergeEvent>())
@@ -1090,7 +1279,7 @@ impl EntityFrame {
             .map(|h| h.partition_cache.len() * 500_000) // ~500KB per cached partition
             .sum();
         
-        (merge_memory + cache_memory) as f64
+        (context_memory + merge_memory + cache_memory) as f64
     }
 }
 ```
@@ -1099,7 +1288,7 @@ impl EntityFrame {
 
 ```rust
 /// Expected performance for different scales
-/// Based on merge event representation with LRU caching
+/// Based on contextual ownership with automatic compaction
 pub struct PerformanceProfile {
     pub scale: DataScale,
     pub hierarchy_build_time: Duration,
