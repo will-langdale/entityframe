@@ -1,7 +1,7 @@
 """Comprehensive test suite for entity metadata functionality."""
 
 import pytest
-from entityframe import EntityFrame, Entity
+from starlings import EntityFrame, Entity
 
 
 # Basic Metadata Operations

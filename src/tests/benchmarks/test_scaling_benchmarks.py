@@ -5,7 +5,7 @@ Tests that performance scales appropriately with data size.
 
 import time
 import pytest
-from entityframe import EntityFrame
+from starlings import EntityFrame
 
 
 class TestScalingBenchmarks:

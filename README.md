@@ -1,13 +1,13 @@
-# EntityFrame
+# starlings
 
 **High-performance entity resolution evaluation for Python**
 
-EntityFrame treats entities as what they truly are: collections of records across multiple datasets. Compare entity resolution methods efficiently using set operations rather than pairwise record comparisons.
+starlings treats entities as what they truly are: collections of records across multiple datasets. Compare entity resolution methods efficiently using set operations rather than pairwise record comparisons.
 
 ## Quickstart
 
 ```python
-import entityframe as ef
+import starlings as sl
 
 # Your entity resolution results from two different methods
 splink_results = [
@@ -21,7 +21,7 @@ dedupe_results = [
 ]
 
 # Create frame and declare datasets upfront for efficiency
-frame = ef.EntityFrame()
+frame = sl.EntityFrame()
 frame.declare_dataset("customers")
 frame.declare_dataset("transactions")
 
@@ -39,11 +39,11 @@ avg_similarity = sum(c['jaccard'] for c in comparisons) / len(comparisons)
 print(f"Average agreement: {avg_similarity:.2f}")
 ```
 
-## What is EntityFrame?
+## What is starlings?
 
-Traditional entity resolution evaluation compares pairs of records. EntityFrame compares **entities as complete objects** - collections of records that span multiple datasets.
+Traditional entity resolution evaluation compares pairs of records. starlings compares **entities as complete objects** - collections of records that span multiple datasets.
 
-Instead of asking "do these two records match?", EntityFrame asks "how well do these two methods agree on what constitutes this entity?"
+Instead of asking "do these two records match?", starlings asks "how well do these two methods agree on what constitutes this entity?"
 
 ## Core concepts
 
@@ -76,7 +76,7 @@ just install && just build
 ## Working with hashes and metadata
 
 ```python
-import entityframe as ef
+import starlings as sl
 
 # Method 1: Conservative clustering
 method1 = [
@@ -90,7 +90,7 @@ method2 = [
 ]
 
 # Create frame and declare datasets upfront for efficiency
-frame = ef.EntityFrame()
+frame = sl.EntityFrame()
 frame.declare_dataset("customers")
 frame.declare_dataset("emails")
 
@@ -120,7 +120,7 @@ for result in results:
 ## Working with pre-existing metadata
 
 ```python
-import entityframe as ef
+import starlings as sl
 
 # Entities with existing metadata (from previous processing)
 existing_entities = [
@@ -147,7 +147,7 @@ existing_entities = [
 ]
 
 # Create frame and add method with existing entities
-frame = ef.EntityFrame()
+frame = sl.EntityFrame()
 frame.declare_dataset("customers")
 frame.declare_dataset("emails")
 frame.add_method("imported", existing_entities)
@@ -185,10 +185,10 @@ print(f"Jaccard similarity: {similarity:.2f}")
 
 ## Working with multiple methods
 
-EntityFrame makes it simple to compare different entity resolution approaches:
+starlings makes it simple to compare different entity resolution approaches:
 
 ```python
-frame = ef.EntityFrame()
+frame = sl.EntityFrame()
 
 # Add results from different methods
 frame.add_method("splink", splink_results)
@@ -209,8 +209,8 @@ print(f"Total entities per method: {frame.total_entities() // len(frame.get_coll
 ### `EntityFrame`
 
 ```python
-frame = ef.EntityFrame()
-frame = ef.EntityFrame.with_datasets(["ds1", "ds2"])  # Pre-declare datasets (optional)
+frame = sl.EntityFrame()
+frame = sl.EntityFrame.with_datasets(["ds1", "ds2"])  # Pre-declare datasets (optional)
 frame.add_method(name, entity_data)              # Add method results 
 frame.add_collection(name, collection)           # Add pre-built collection  
 frame.compare_collections(name1, name2)          # Compare two methods
@@ -245,7 +245,7 @@ entity.total_records()                          # Count all records
 
 ## Data format
 
-EntityFrame expects your entity resolution results as a list of dictionaries:
+starlings expects your entity resolution results as a list of dictionaries:
 
 ```python
 entity_data = [
@@ -263,7 +263,7 @@ entity_data = [
 
 ## Performance
 
-EntityFrame is built for scale:
+starlings is built for scale:
 
 - **Memory efficient**: Handles millions of entities without breaking a sweat
 - **Fast comparisons**: Optimised set operations for entity comparison

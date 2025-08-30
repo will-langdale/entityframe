@@ -4,7 +4,7 @@ Tests core performance to catch regressions in key operations.
 """
 
 import time
-from entityframe import EntityFrame
+from starlings import EntityFrame
 
 
 class TestPerformanceRegression:

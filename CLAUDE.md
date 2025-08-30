@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-EntityFrame is a hybrid Python/Rust package for comparing entity resolutions from different processes. The project uses PyO3 bindings to combine Python's ease of use with Rust's performance for computationally intensive operations.
+starlings is a hybrid Python/Rust package for comparing entity resolutions from different processes. The project uses PyO3 bindings to combine Python's ease of use with Rust's performance for computationally intensive operations.
 
 ### Core Architecture
 
-EntityFrame implements a three-layer architecture for high-performance entity evaluation:
+starlings implements a three-layer architecture for high-performance entity evaluation:
 
 1. **String Interning (Layer 1)**: Global string pool mapping record IDs to compact integers
 2. **Roaring Bitmaps (Layer 2)**: Compressed bitmap sets optimised for set operations
@@ -33,8 +33,8 @@ The project follows UV's proven structure with symmetrical organisation under `s
 
 ```
 src/
-├── python/entityframe/    # Python package with main API
-├── rust/entityframe/      # Rust crate with PyO3 bindings
+├── python/starlings/    # Python package with main API
+├── rust/starlings/      # Rust crate with PyO3 bindings
 │   ├── Cargo.toml        # Rust-specific configuration
 │   └── src/lib.rs        # Rust implementation
 └── tests/                # Python test suite
@@ -43,7 +43,7 @@ src/
 **Build system**: 
 - Root `Cargo.toml`: Workspace configuration
 - Root `pyproject.toml`: Python package config with maturin build backend
-- `src/rust/entityframe/Cargo.toml`: Rust crate config with PyO3 dependencies
+- `src/rust/starlings/Cargo.toml`: Rust crate config with PyO3 dependencies
 
 ## Development commands
 
