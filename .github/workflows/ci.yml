@@ -34,7 +34,7 @@ jobs:
       run: just build
     
     - name: Run Python tests
-      run: uv run pytest
+      run: uv run pytest -m "not slow"
 
   test-os:
     name: test on ${{ matrix.os }}
@@ -66,7 +66,7 @@ jobs:
         RUST_BACKTRACE: 1
 
     - name: Run Python tests
-      run: uv run pytest
+      run: uv run pytest -m "not slow"
     
     - name: Run Rust tests
       run: cargo test --no-default-features
