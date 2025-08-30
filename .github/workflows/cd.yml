@@ -1,5 +1,4 @@
 name: CD
-
 on:
   release:
     types: [published]
@@ -11,7 +10,7 @@ jobs:
       version: ${{ steps.get-version.outputs.version }}
     
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     
     - name: Get version from tag
       id: get-version
@@ -20,27 +19,16 @@ jobs:
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Version: $VERSION"
     
-    - name: Update pyproject.toml version
-      run: |
-        VERSION=${{ steps.get-version.outputs.version }}
-        sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
-    
     - name: Update Rust Cargo.toml version
       run: |
         VERSION=${{ steps.get-version.outputs.version }}
-        sed -i "s/^version = .*/version = \"$VERSION\"/" src/rust/entityframe/Cargo.toml
-    
-    - name: Upload pyproject.toml
-      uses: actions/upload-artifact@v4
-      with:
-        name: pyproject
-        path: pyproject.toml
+        sed -i "s/^version = .*/version = \"$VERSION\"/" src/rust/starlings/Cargo.toml
     
     - name: Upload Cargo.toml
       uses: actions/upload-artifact@v4
       with:
         name: cargo-toml
-        path: src/rust/entityframe/Cargo.toml
+        path: src/rust/starlings/Cargo.toml
 
   build-wheels:
     name: Build wheels on ${{ matrix.os }}
@@ -52,19 +40,15 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-13, macos-14]
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Download pyproject.toml
-      uses: actions/download-artifact@v4
+    - uses: actions/checkout@v5
       with:
-        name: pyproject
-        path: .
+        fetch-depth: 0
     
     - name: Download Cargo.toml
       uses: actions/download-artifact@v4
       with:
         name: cargo-toml
-        path: src/rust/entityframe/
+        path: src/rust/starlings/
     
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v6
@@ -98,19 +82,15 @@ jobs:
     needs: update-version
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Download pyproject.toml
-      uses: actions/download-artifact@v4
+    - uses: actions/checkout@v5
       with:
-        name: pyproject
-        path: .
+        fetch-depth: 0
     
     - name: Download Cargo.toml
       uses: actions/download-artifact@v4
       with:
         name: cargo-toml
-        path: src/rust/entityframe/
+        path: src/rust/starlings/
     
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v6
@@ -135,20 +115,20 @@ jobs:
   build-docs:
     name: Build documentation
     runs-on: ubuntu-latest
-    needs: update-version
-
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      
       - name: Install uv and Python
         uses: astral-sh/setup-uv@v6
-
+      
       - name: Install project with docs dependencies
-        run: uv sync --all-extras
-
+        run: uv sync --group dev
+      
       - name: Build with MkDocs
         run: uv run mkdocs build
-
+      
       - name: Upload documentation artifact
         uses: actions/upload-pages-artifact@v3
         with:
@@ -189,7 +169,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-
+    
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

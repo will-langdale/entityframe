@@ -5,12 +5,13 @@ Tests that performance scales appropriately with data size.
 
 import time
 import pytest
-from entityframe import EntityFrame
+from starlings import EntityFrame
 
 
 class TestScalingBenchmarks:
     """Test scaling performance using new API."""
 
+    @pytest.mark.slow
     def test_linear_scaling_verification(self):
         """Test that performance scales linearly (not quadratically) with entity count."""
         scales = [100, 500, 1000, 2000]
@@ -50,6 +51,7 @@ class TestScalingBenchmarks:
             degradation_ratio > 0.5
         ), f"Performance degraded too much: {degradation_ratio:.2f}"
 
+    @pytest.mark.slow
     def test_large_scale_performance(self):
         """Test performance with larger datasets to catch algorithmic issues."""
         count = 5000
@@ -83,6 +85,7 @@ class TestScalingBenchmarks:
             assert "hash" in entity["metadata"]
             assert len(entity["metadata"]["hash"]) == 32
 
+    @pytest.mark.slow
     def test_parallel_vs_sequential_threshold(self):
         """Test that parallel processing kicks in appropriately."""
         # Test both sides of the 1000 entity threshold for parallel processing
@@ -111,7 +114,8 @@ class TestScalingBenchmarks:
             assert len(collection) == count
             entity = collection[0]
             assert "hash" in entity["metadata"]
-
+    
+    @pytest.mark.slow
     def test_memory_scaling_efficiency(self):
         """Test memory efficiency doesn't degrade with scale."""
         count = 3000

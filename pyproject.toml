@@ -1,6 +1,6 @@
 [project]
-name = "entityframe"
-version = "0.1.0"
+name = "starlings"
+dynamic = ["version"]
 description = "A Python package for comparing entity resolutions from different processes"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -27,10 +27,14 @@ keywords = ["entity-resolution", "data-processing", "rust"]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
+# Presence enables setuptools-scm
+[tool.setuptools_scm]
+
+
 [tool.maturin]
 python-source = "src/python"
-module-name = "entityframe.entityframe"
-manifest-path = "src/rust/entityframe/Cargo.toml"
+module-name = "starlings.starlings"
+manifest-path = "src/rust/starlings/Cargo.toml"
 
 [dependency-groups]
 dev = [
@@ -51,7 +55,7 @@ warn_unused_configs = true
 disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = "entityframe.entityframe"
+module = "starlings.starlings"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

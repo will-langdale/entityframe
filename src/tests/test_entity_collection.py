@@ -3,7 +3,7 @@ Tests for EntityCollection functionality (single process entity resolution).
 """
 
 import pytest
-from entityframe import CollectionCore, EntityFrame
+from starlings import CollectionCore, EntityFrame
 
 
 class TestEntityCollection:
