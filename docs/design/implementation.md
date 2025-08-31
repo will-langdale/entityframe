@@ -100,7 +100,7 @@ impl Collection {
 
 ### Efficient Hierarchical Data Structures
 
-**Merge-event based hierarchy with smart caching**
+**Merge-event based hierarchy with smart caching and fixed-point thresholds**
 
 ```rust
 pub struct PartitionHierarchy {
@@ -108,16 +108,29 @@ pub struct PartitionHierarchy {
     merges: Vec<MergeEvent>,
     
     // Secondary: Cache for frequently accessed partitions
-    partition_cache: LruCache<OrderedFloat<f64>, PartitionLevel>,
+    // Using u32 keys (threshold * 1_000_000) for exact comparison
+    partition_cache: LruCache<u32, PartitionLevel>,
     
     // Tertiary: State for incremental metric computation
     metric_state: Option<IncrementalMetricState>,
     
-    // Index for binary search on thresholds
-    threshold_index: BTreeMap<OrderedFloat<f64>, usize>,
+    // Index for binary search on thresholds (using integer keys)
+    threshold_index: BTreeMap<u32, usize>,
     
     // Configuration
-    cache_size: usize,
+    cache_size: usize,  // Non-configurable size 10 per hierarchy for v1
+}
+
+impl PartitionHierarchy {
+    const PRECISION_FACTOR: f64 = 1_000_000.0;  // Supports quantize up to 6 decimal places
+    
+    fn threshold_to_key(threshold: f64) -> u32 {
+        (threshold.clamp(0.0, 1.0) * Self::PRECISION_FACTOR).round() as u32
+    }
+    
+    fn key_to_threshold(key: u32) -> f64 {
+        key as f64 / Self::PRECISION_FACTOR
+    }
 }
 
 pub struct MergeEvent {
@@ -217,23 +230,22 @@ impl EntityFrame {
 
 ### Connected Components Algorithm for Hierarchy Construction
 
-**Union-find based merge event extraction with quantization support**
+**Union-find based merge event extraction with mandatory quantization**
 
 ```rust
 use disjoint_sets::UnionFind;
 
 impl PartitionHierarchy {
     pub fn from_edges(edges: Vec<(u32, u32, f64)>, 
-                     quantize: Option<u32>) -> Self {
-        // Optional quantization
-        let mut sorted_edges = if let Some(decimals) = quantize {
-            let factor = 10_f64.powi(decimals as i32);
-            edges.into_iter()
-                .map(|(i, j, w)| (i, j, (w * factor).round() / factor))
-                .collect()
-        } else {
-            edges
-        };
+                     quantize: u32) -> Self {  // No longer Optional
+        // Validate quantize is 1-6
+        assert!(quantize >= 1 && quantize <= 6, "quantize must be between 1 and 6");
+        
+        // Apply quantization
+        let factor = 10_f64.powi(quantize as i32);
+        let mut sorted_edges: Vec<_> = edges.into_iter()
+            .map(|(i, j, w)| (i, j, (w * factor).round() / factor))
+            .collect();
         
         // Sort edges by weight (descending) - O(m log m)
         sorted_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
@@ -350,12 +362,19 @@ impl PartitionHierarchy {
             cache_size: 10,
         }
     }
+    
+    fn build_threshold_index(merges: &[MergeEvent]) -> BTreeMap<u32, usize> {
+        merges.iter()
+            .enumerate()
+            .map(|(idx, merge)| (Self::threshold_to_key(merge.threshold), idx))
+            .collect()
+    }
 }
 ```
 
 ### Partition Reconstruction from Merge Events
 
-**Efficient reconstruction algorithm**
+**Efficient reconstruction algorithm with fixed-point thresholds**
 
 ```rust
 impl PartitionHierarchy {
@@ -365,9 +384,9 @@ impl PartitionHierarchy {
             return Err(HierarchyError::InvalidThreshold(threshold));
         }
         
-        let key = OrderedFloat(threshold);
+        let key = Self::threshold_to_key(threshold);
         
-        // Check cache first
+        // Check cache first using integer key
         if self.partition_cache.contains(&key) {
             return Ok(self.partition_cache.get(&key).unwrap());
         }
@@ -480,7 +499,7 @@ impl EntityFrame {
 
 ### Lazy Metric Computation Framework
 
-**LazyMetric pattern implementation**
+**LazyMetric pattern implementation with complexity annotations**
 
 ```rust
 pub struct LazyMetricsCache {
@@ -546,6 +565,11 @@ impl LazyMetricsCache {
         }
     }
 }
+
+// Metric computation complexity annotations
+// Fully incremental O(k): Precision, Recall, F1, ARI, NMI
+// Semi-incremental O(k × avg_entity_size): B-cubed metrics
+// Note: All metrics benefit from caching between repeated queries
 ```
 
 ### Sparse Structure Exploitation
@@ -1051,16 +1075,26 @@ impl PyEntityFrame {
             }
         });
         
-        match operation {
+        // Always return List[Dict[str, float]]
+        let results = match operation {
             Operation::PointComparison(cuts) => {
-                let result = frame.compare_cuts(cuts, metrics);
-                Python::with_gil(|py| Ok(result.to_pydict(py)))
+                let metrics = frame.compare_cuts(cuts, metrics);
+                vec![metrics]  // Single dict in list
             },
             Operation::Sweep(sweep_spec) => {
-                let result = frame.sweep(sweep_spec, metrics);
-                Python::with_gil(|py| Ok(result.to_dataframe(py)))
+                frame.sweep(sweep_spec, metrics)  // Already returns List[Dict]
             },
-        }
+        };
+        
+        Python::with_gil(|py| {
+            // Convert to Python list of dicts
+            let py_list = PyList::new(py, 
+                results.into_iter().map(|dict| {
+                    dict.to_pydict(py)
+                })
+            );
+            Ok(py_list.into())
+        })
     }
     
     // American spelling alias
@@ -1087,9 +1121,17 @@ pub struct PyCollection {
 #[pymethods]
 impl PyCollection {
     #[staticmethod]
-    pub fn from_edges(edges: Vec<(PyObject, PyObject, f64)>) -> PyResult<Self> {
+    pub fn from_edges(edges: Vec<(PyObject, PyObject, f64)>, 
+                     quantize: u32) -> PyResult<Self> {  // Python int → Rust u32
+        // Validate quantize
+        if quantize < 1 || quantize > 6 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "quantize must be between 1 and 6"
+            ));
+        }
+        
         // Convert Python objects to Rust Key types
-        let collection = Collection::from_edges(convert_edges(edges)?);
+        let collection = Collection::from_edges(convert_edges(edges)?, quantize);
         Ok(PyCollection { inner: collection })
     }
     
@@ -1390,7 +1432,7 @@ impl BatchProcessor {
         for chunk in chunks {
             let hierarchy = PartitionHierarchy::from_edges(
                 chunk.collect(), 
-                None  // No quantization by default
+                6  // Default quantization
             );
             // Process hierarchy...
         }

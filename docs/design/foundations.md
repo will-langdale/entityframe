@@ -228,6 +228,18 @@ Starlings uses threshold-based connected components to build hierarchies from pa
 
 **Complexity analysis**: O(m log m) where m is the number of edges. For practical entity resolution with blocking/LSH preprocessing, m is typically O(n) to O(n log n), not O(n²).
 
+### Fixed-Point Threshold Representation
+
+To ensure robust threshold comparisons and avoid floating-point equality issues, Starlings uses fixed-point representation internally while maintaining a float API:
+
+**Internal representation**: Thresholds are stored as 32-bit integers by multiplying by 10⁶ and rounding. This provides 6 decimal places of precision - more than sufficient for any similarity score.
+
+**Quantization policy**: All hierarchies require explicit quantization (default: 6 decimal places). This prevents float comparison bugs and ensures predictable memory usage. Users can specify 1-6 decimal places based on their precision needs.
+
+**Example**: User threshold 0.85 → Internal key 850000 → Exact equality comparisons
+
+This design choice eliminates an entire class of floating-point comparison bugs while maintaining the intuitive float API that users expect.
+
 ### N-way Merges and Real-World Patterns
 
 **Natural n-way merge representation**
@@ -264,10 +276,6 @@ N_{ij}(t + Δt) = N_{ij}(t) + ΔN_{ij}
 ```
 
 This enables O(k) updates for metrics like ARI and NMI as we move between thresholds, where k is the number of affected entities.
-
-**Float precision and quantization**
-
-When constructing hierarchies from edges, float quantization requires explicit opt-in. This allows users to control the trade-off between precision and the number of distinct merge events in the hierarchy.
 
 ### Complete Mathematical Operation Space
 
@@ -385,10 +393,10 @@ To resolve the fundamental conflict between standalone collection encapsulation 
 When collections are combined into an EntityFrame, they share the same DataContext through Arc reference counting. This eliminates duplication while maintaining the ability for collections to exist independently. The append-only nature guarantees index stability, enabling lock-free concurrent reads.
 
 **Copy-on-Write for safe mutations**:
-When a collection that is a view (shares its DataContext with a frame) needs to be modified, it automatically triggers a Copy-on-Write operation. This creates a deep copy with its own DataContext, ensuring mutations don't affect the parent frame. This trade-off prioritises memory efficiency in the common read-heavy case while maintaining safety for mutations.
+When a collection that is a view (shares its DataContext with a frame) needs to be modified, it automatically triggers a Copy-on-Write operation. This creates a deep copy with its own DataContext, ensuring mutations don't affect the parent frame. This trade-off prioritises memory efficiency in the common read-heavy case while maintaining safety for mutations. **CoW triggers**: Copy-on-Write occurs when: (1) a view from a frame is modified via methods like `add_edges()`, or (2) explicitly via `copy()`. Standalone collections modify in-place without triggering CoW.
 
 **Automatic memory management**:
-When collections are removed from a frame, automatic compaction can reclaim unused space when garbage exceeds a threshold. This happens transparently without user intervention, maintaining the simplicity of the user-facing API while ensuring long-term memory efficiency. Float quantization can be explicitly enabled during hierarchy construction to reduce the number of distinct threshold levels, trading precision for memory efficiency.
+When collections are removed from a frame, automatic compaction can reclaim unused space when garbage exceeds a threshold. This happens transparently without user intervention, maintaining the simplicity of the user-facing API while ensuring long-term memory efficiency.
 
 ### Theoretical Guarantees
 

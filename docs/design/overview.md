@@ -64,14 +64,14 @@ results = ef.analyse(
     sl.col("truth").at(1.0),
     metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision, sl.Metrics.eval.recall]
 )
-# Returns list of dicts: [{"threshold": 0.5, "f1": 0.72, ...}, ...]
+# Returns List[Dict]: [{"splink_threshold": 0.5, "truth_threshold": 1.0, "f1": 0.72, ...}, ...]
 
 # Convert to polars for analysis
 df = pl.from_dicts(results)
 optimal = df.filter(pl.col("f1") == pl.col("f1").max()).row(0, named=True)
 
 # Direct access for simple operations
-partition = ef["splink"].at(optimal["threshold"])
+partition = ef["splink"].at(optimal["splink_threshold"])
 entities = partition.to_list()  # List of sets of (source, key) pairs
 
 # Apply operations to entities
@@ -95,6 +95,9 @@ Collections use contextual ownership—they own their data when standalone, but 
 - **Rust core**: For performance-critical merge event processing with parallel execution via Rayon
 - **Python interface**: For familiar data science workflows via PyO3 with automatic type conversion
 - **Arrow integration**: For cross-language data transport with optimal dictionary encoding at the global level
+
+### Robust Threshold Handling
+Starlings uses fixed-point representation internally (multiply by 10^6) while maintaining a float API. This eliminates floating-point comparison bugs through mandatory quantization (1-6 decimal places, default 6), ensuring exact threshold comparisons and predictable behaviour.
 
 ## Injectable Operations Pattern
 

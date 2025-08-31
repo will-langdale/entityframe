@@ -123,42 +123,52 @@ class EntityFrame:
             sweep_df = ef["splink"].sweep(0.5, 0.95)
         """
     
-    def analyse(self, *expressions, metrics: Optional[List] = None) -> Union[Dict, pd.DataFrame]:
+    def analyse(self, *expressions, metrics: Optional[List] = None) -> List[Dict[str, float]]:
         """
         Universal analysis method using expressions.
         
-        This is the primary method for cross-collection comparisons and analysis.
-        Inspired by polars' expression API for composability.
+        Always returns List[Dict[str, float]] where each dict represents one measurement.
+        This uniform format works seamlessly with DataFrame libraries.
         
         Args:
             *expressions: One or more sl.col() expressions
-            metrics: List of metrics to compute. Defaults to eval metrics for comparisons
-                     (f1, precision, recall, ari, nmi) or stats metrics for single
-                     collections (entity_count, entropy).
-                     Available metrics: sl.Metrics.eval.* for comparisons,
-                                      sl.Metrics.stats.* for single collections
+            metrics: List of metrics to compute (defaults based on operation type)
         
         Returns:
-            Dict for point comparisons, DataFrame for sweeps
+            List[Dict[str, float]]: Uniform format regardless of operation:
+            - Point comparisons: Single dict in list
+            - Sweeps: One dict per threshold point  
+            - Mixed operations: Cartesian product of sweep points
             
+            Dictionary keys:
+            - "{collection}_threshold" for all threshold values (no special cases)
+            - Direct metric names ("f1", "precision", "recall", etc.)
+        
         Example:
-            # Compare two collections at specific thresholds
-            results = ef.analyse(
-                sl.col("splink").at(0.85),
-                sl.col("ground_truth").at(1.0),
-                metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision, sl.Metrics.eval.recall]
-            )
+            # Point comparison
+            >>> result = ef.analyse(
+            ...     sl.col("splink").at(0.85),
+            ...     sl.col("truth").at(1.0)
+            ... )
+            [{"splink_threshold": 0.85, "truth_threshold": 1.0, "f1": 0.92, ...}]
             
-            # Sweep analysis
-            sweep_df = ef.analyse(
-                sl.col("splink").sweep(0.5, 0.95, 0.01),
-                sl.col("ground_truth").at(1.0)
-            )
+            # Single collection sweep (note: still uses collection_threshold)
+            >>> result = ef.analyse(sl.col("splink").sweep(0.7, 0.9, 0.1))
+            [{"splink_threshold": 0.7, "entity_count": 1250, "entropy": 7.2},
+             {"splink_threshold": 0.8, "entity_count": 980, "entropy": 6.8},
+             {"splink_threshold": 0.9, "entity_count": 750, "entropy": 6.1}]
             
-            # Single collection analysis (uses sl.report by default)
-            stats = ef.analyse(
-                sl.col("splink").at(0.85)
-            )  # Returns entity_count, entropy, and other single-collection metrics
+            # Mixed operations (cartesian product)
+            >>> result = ef.analyse(
+            ...     sl.col("splink").sweep(0.8, 0.9, 0.1),
+            ...     sl.col("dedupe").at(0.75)
+            ... )
+            [{"splink_threshold": 0.8, "dedupe_threshold": 0.75, "f1": 0.82, ...},
+             {"splink_threshold": 0.9, "dedupe_threshold": 0.75, "f1": 0.87, ...}]
+            
+            # Easy DataFrame conversion
+            >>> import polars as pl
+            >>> df = pl.from_dicts(result)
         """
     
     # American spelling alias
@@ -223,7 +233,7 @@ class Collection:
     @classmethod
     def from_edges(cls,
                   edges: List[Tuple[Any, Any, float]],
-                  quantize: Optional[int] = None) -> 'Collection':
+                  quantize: int = 6) -> 'Collection':
         """
         Build collection from weighted edges.
         
@@ -231,14 +241,15 @@ class Collection:
             edges: List of (record_i, record_j, similarity) tuples
                   Records can be any hashable type (int, str, bytes)
                   Raw values are automatically wrapped in Key objects
-            quantize: Optional decimal places to round thresholds to
-                     (e.g., quantize=4 rounds to 0.0001 precision)
+            quantize: Decimal places for threshold precision (1-6, default: 6).
+                     Prevents floating-point comparison issues.
             
         Returns:
             New Collection with hierarchy of merge events
             
         Note:
             Complexity: O(m log m) where m = len(edges).
+            Python keys (int/str/bytes) are converted to internal Key enum at the Python/Rust boundary.
             
         Example:
             edges = [
@@ -638,12 +649,12 @@ sweep_results = ef.analyse(
     sl.col("ground_truth").at(1.0),
     metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision, sl.Metrics.eval.recall]
 )
-# Returns list of dicts: [{"threshold": 0.5, "f1": 0.72, ...}, ...]
+# Returns List[Dict]: [{"splink_output_threshold": 0.5, "ground_truth_threshold": 1.0, "f1": 0.72, ...}, ...]
 
 # Convert to polars for analysis
 df_results = pl.from_dicts(sweep_results)
 optimal_row = df_results.filter(pl.col("f1") == pl.col("f1").max()).row(0, named=True)
-print(f"Optimal threshold: {optimal_row['threshold']:.2f} (F1={optimal_row['f1']:.3f})")
+print(f"Optimal threshold: {optimal_row['splink_output_threshold']:.2f} (F1={optimal_row['f1']:.3f})")
 ```
 
 ### Integration with er-evaluation
@@ -664,6 +675,7 @@ sweep_results = ef.analyse(
     sl.col("predicted").sweep(0.5, 0.95),
     sl.col("truth").at(1.0)
 )
+# Returns: [{"predicted_threshold": 0.5, "truth_threshold": 1.0, ...}, ...]
 
 # Or extract partition for er-evaluation  
 partition = ef["predicted"].at(0.85)
@@ -705,7 +717,7 @@ sweep_results = ef.analyse(
 df_results = pl.from_dicts(sweep_results)
 optimal_threshold = df_results.filter(
     pl.col("f1") == pl.col("f1").max()
-).select("threshold")[0, 0]
+).select("matchbox_threshold")[0, 0]
 
 # Export with hashes at optimal threshold
 partition = ef["matchbox"].at(optimal_threshold)
@@ -812,7 +824,7 @@ ef = sl.EntityFrame.from_arrow(table)
   - Automatic compaction on ef.drop()
   - Collection.copy() for view detachment
   - Memory-mapped storage for large datasets
-  - Optional quantisation support
+  - Mandatory quantisation support
   
 - Week 10-12: Batch processing enhancements
   - Optimised cache strategies
@@ -880,7 +892,7 @@ large_scale:  # 10M records, ~50M edges
 complexity:
   hierarchy_construction: O(m log m) where m = edges
   partition_reconstruction: O(m)
-  cached_query: O(1)
+  cached_query: O(1)  # LRU cache maintains 10 partitions per hierarchy (non-configurable in v1)
   incremental_metric: O(k) where k = affected entities
   memory: O(m) for merge events + O(c × n) for c cached partitions
 ```
@@ -901,7 +913,7 @@ class StarlingsBenchmark:
     def benchmark_hierarchy_build(self):
         edges = self.generate_edges()
         start = time.time()
-        collection = sl.Collection.from_edges(edges, self.num_records)
+        collection = sl.Collection.from_edges(edges)  # Uses default quantize=6
         return time.time() - start
     
     def benchmark_partition_reconstruction(self, collection):
@@ -930,7 +942,7 @@ class StarlingsBenchmark:
     def benchmark_entity_hashing(self, collection):
         partition = collection.at(0.85)
         start = time.time()
-        hashes = partition.map(sl.Hash.blake3)
+        hashes = partition.map(sl.Ops.hash.blake3)
         return time.time() - start
 ```
 
@@ -993,13 +1005,17 @@ comparison = ef.analyse(
     sl.col("truth").at(1.0),
     metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision, sl.Metrics.eval.recall]
 )
+# Returns: [{"splink_threshold": 0.85, "dedupe_threshold": 0.76, "truth_threshold": 1.0, ...}]
 
 # Find optimal thresholds efficiently
 splink_sweep = ef.analyse(
     sl.col("splink").sweep(0.5, 0.95),
     sl.col("truth").at(1.0)
 )
-optimal = splink_sweep.loc[splink_sweep['f1'].idxmax()]
+# Convert to dataframe for analysis
+import polars as pl
+df = pl.from_dicts(splink_sweep)
+optimal = df.filter(df['f1'] == df['f1'].max()).row(0, named=True)
 ```
 
 ### Important Notes on Performance
@@ -1007,5 +1023,6 @@ optimal = splink_sweep.loc[splink_sweep['f1'].idxmax()]
 1. **First partition access**: Reconstructs from merge events O(m)
 2. **Subsequent accesses**: Use cache O(1)
 3. **Threshold sweeps**: Use incremental updates O(k) between adjacent thresholds
-4. **Memory usage**: ~25MB for 1M edges with DataContext architecture
+4. **Memory usage**: ~60-115MB for 1M edges with DataContext architecture
 5. **Sparse graphs assumed**: Starlings expects m << n² from blocking/LSH
+6. **Key types**: All key types (int/str/bytes) have equivalent performance after interning
