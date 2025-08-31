@@ -45,7 +45,7 @@ pub struct InternedRecord {
 pub enum Key {
     U32(u32),
     U64(u64),
-    String(InternedString),
+    String(String),  // Keys don't need interning - they're unique by definition
     Bytes(Vec<u8>),
 }
 ```
@@ -166,7 +166,7 @@ For 1M records with 1M edges in the Contextual Ownership model:
 
 ### Assimilation Process
 
-**Adding collections to frames**
+**Adding collections to frames with O(k + m) complexity**
 
 ```rust
 impl EntityFrame {
@@ -182,17 +182,20 @@ impl EntityFrame {
     }
     
     fn assimilate(&mut self, collection: Collection) -> AssimilatedCollection {
+        // Complexity: O(k) where k = incoming collection's records
+        //           + O(m) where m = merge events to rewrite
         let mut translation_map = TranslationMap::new();
         
         // Identity resolution: (source, key) determines identity
+        // O(k) iterations with O(1) HashMap lookups
         for (idx, record) in collection.context.records.iter().enumerate() {
             let identity = (record.source_id, &record.key);
             
             if let Some(&existing_idx) = self.context.identity_map.get(&identity) {
-                // Record exists, map to existing
+                // Record exists, map to existing - O(1)
                 translation_map.insert(idx, existing_idx);
             } else {
-                // New record, append to context
+                // New record, append to context - O(1)
                 let new_idx = self.context.records.len();
                 self.context.records.push(record.clone());
                 self.context.identity_map.insert(identity, new_idx);
@@ -200,7 +203,7 @@ impl EntityFrame {
             }
         }
         
-        // Translate hierarchy to use new indices
+        // Translate hierarchy to use new indices - O(m)
         let mut new_hierarchy = collection.hierarchy.clone();
         new_hierarchy.translate_indices(&translation_map);
         
@@ -221,7 +224,6 @@ use disjoint_sets::UnionFind;
 
 impl PartitionHierarchy {
     pub fn from_edges(edges: Vec<(u32, u32, f64)>, 
-                     num_records: u32, 
                      quantize: Option<u32>) -> Self {
         // Optional quantization
         let mut sorted_edges = if let Some(decimals) = quantize {
@@ -235,6 +237,13 @@ impl PartitionHierarchy {
         
         // Sort edges by weight (descending) - O(m log m)
         sorted_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+        
+        // Determine number of records from edges
+        let num_records = sorted_edges.iter()
+            .flat_map(|(i, j, _)| vec![*i, *j])
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         
         // Group edges by threshold (handles quantization naturally)
         let mut threshold_groups: Vec<(f64, Vec<(u32, u32)>)> = Vec::new();
@@ -820,56 +829,58 @@ fn compute_entity_hashes(partition: &PartitionLevel) -> Vec<[u8; 32]> {
 
 ### Arrow Integration
 
-**Hierarchical Arrow schema with dictionary encoding**
+**Hierarchical Arrow schema with optimal dictionary encoding**
 
 ```rust
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, UnionMode};
 
 pub fn create_starlings_schema() -> Schema {
     Schema::new(vec![
-        // Collection metadata
-        Field::new("collection_id", DataType::Utf8, false),
-        
-        // Interned references with dictionary encoding
-        Field::new("source_dictionary", DataType::Dictionary(
+        // Parallel arrays for maximum deduplication efficiency
+        Field::new("record_sources", DataType::Dictionary(
             Box::new(DataType::UInt16),
             Box::new(DataType::Utf8),
         ), false),
         
-        // Records
-        Field::new("records", DataType::List(Box::new(DataType::Struct(vec![
-            Field::new("source", DataType::Dictionary(
-                Box::new(DataType::UInt16),
+        Field::new("record_keys", DataType::Dictionary(
+            Box::new(DataType::UInt32),
+            Box::new(DataType::Union(
+                vec![
+                    Field::new("u32", DataType::UInt32, false),
+                    Field::new("u64", DataType::UInt64, false),
+                    Field::new("string", DataType::Utf8, false),
+                    Field::new("bytes", DataType::Binary, false),
+                ],
+                vec![0, 1, 2, 3],  // Type ids
+                UnionMode::Dense,
+            )),
+        ), false),
+        
+        Field::new("record_indices", DataType::UInt32, false),  // Simple array of indices
+        
+        // Collections with merge events
+        Field::new("collections", DataType::List(Box::new(DataType::Struct(vec![
+            Field::new("name", DataType::Dictionary(
+                Box::new(DataType::UInt8),
                 Box::new(DataType::Utf8),
             ), false),
-            Field::new("key", DataType::Utf8, false),
-            Field::new("record_index", DataType::UInt32, false),
+            Field::new("merge_events", DataType::List(
+                Box::new(DataType::Struct(vec![
+                    Field::new("threshold", DataType::Float64, false),
+                    Field::new("merging_components", DataType::List(
+                        Box::new(DataType::UInt32)
+                    ), false),
+                    Field::new("result_component", DataType::UInt32, false),
+                    Field::new("affected_records", DataType::List(
+                        Box::new(DataType::UInt32)
+                    ), false),
+                ]))
+            ), false),
         ]))), false),
         
-        // Merge events (expanded, not binary)
-        Field::new("merge_events", DataType::List(Box::new(Field::new(
-            "merge", 
-            DataType::Struct(vec![
-                Field::new("threshold", DataType::Float64, false),
-                Field::new("merging_components", DataType::List(
-                    Box::new(DataType::UInt32)
-                ), false),
-                Field::new("result_component", DataType::UInt32, false),
-                Field::new("affected_records", DataType::List(
-                    Box::new(DataType::UInt32)
-                ), false),
-            ]), 
-            false
-        ))), false),
-        
-        // Statistics
-        Field::new("statistics", DataType::Struct(vec![
-            Field::new("num_merges", DataType::UInt32, false),
-            Field::new("threshold_range", DataType::Struct(vec![
-                Field::new("min", DataType::Float64, false),
-                Field::new("max", DataType::Float64, false),
-            ]), false),
-        ]), true),
+        // Metadata
+        Field::new("version", DataType::Utf8, false),
+        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
     ])
 }
 ```
@@ -982,7 +993,7 @@ impl PyEntityFrame {
         })
     }
     
-    pub fn add_collection(&mut self, 
+    pub fn from_edges(&mut self, 
                          name: &str, 
                          edges: Option<Vec<(PyObject, PyObject, f64)>>,
                          collection: Option<PyCollection>) -> PyResult<()> {
@@ -990,6 +1001,7 @@ impl PyEntityFrame {
         
         if let Some(edges) = edges {
             // Build collection from edges
+            // Python objects (int/str/bytes) are converted to Key enum at this boundary
             let collection = Collection::from_edges(edges);
             frame.add_collection(name, collection);
         } else if let Some(collection) = collection {
@@ -1015,24 +1027,26 @@ impl PyEntityFrame {
         let operation = parse_expressions(expressions)?;
         
         // Use default metrics if none provided
-        // sl.report defaults: [f1, precision, recall, ari, nmi] for comparisons
-        //                     [entity_count, entropy] for single collections
+        // Defaults: eval metrics for comparisons, stats metrics for single collections
         let metrics = metrics.unwrap_or_else(|| {
             match &operation {
-                Operation::SingleCollection(_) => vec![PyMetric::EntityCount, PyMetric::Entropy],
+                Operation::SingleCollection(_) => vec![
+                    MetricsStats::entropy(), 
+                    MetricsStats::entity_count()
+                ],
                 Operation::Comparison(_) => vec![
-                    PyMetric::F1, 
-                    PyMetric::Precision, 
-                    PyMetric::Recall,
-                    PyMetric::ARI,
-                    PyMetric::NMI
+                    MetricsEval::f1(),
+                    MetricsEval::precision(),
+                    MetricsEval::recall(),
+                    MetricsEval::ari(),
+                    MetricsEval::nmi()
                 ],
                 Operation::Sweep(_) => vec![
-                    PyMetric::F1, 
-                    PyMetric::Precision, 
-                    PyMetric::Recall,
-                    PyMetric::ARI,
-                    PyMetric::NMI
+                    MetricsEval::f1(),
+                    MetricsEval::precision(),
+                    MetricsEval::recall(),
+                    MetricsEval::ari(),
+                    MetricsEval::nmi()
                 ],
             }
         });
@@ -1074,6 +1088,7 @@ pub struct PyCollection {
 impl PyCollection {
     #[staticmethod]
     pub fn from_edges(edges: Vec<(PyObject, PyObject, f64)>) -> PyResult<Self> {
+        // Convert Python objects to Rust Key types
         let collection = Collection::from_edges(convert_edges(edges)?);
         Ok(PyCollection { inner: collection })
     }
@@ -1125,6 +1140,182 @@ impl PyColExpression {
     }
 }
 
+// Python Key type wrapper
+#[pyclass]
+pub struct PyKey {
+    inner: Key,
+}
+
+#[pymethods]
+impl PyKey {
+    #[new]
+    pub fn new(value: &PyAny) -> PyResult<Self> {
+        // Automatically convert Python types to appropriate Key variant
+        let inner = if let Ok(v) = value.extract::<u32>() {
+            Key::U32(v)
+        } else if let Ok(v) = value.extract::<u64>() {
+            Key::U64(v)
+        } else if let Ok(v) = value.extract::<String>() {
+            Key::String(v)  // Keys don't need interning - they're unique
+        } else if let Ok(v) = value.extract::<Vec<u8>>() {
+            Key::Bytes(v)
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Key must be int, str, or bytes"
+            ));
+        };
+        Ok(PyKey { inner })
+    }
+}
+
+// Injectable operations pattern implementation
+// These are marker types that route to optimised Rust implementations
+// Recognised by match statements in compute_metrics() and execute_operation()
+#[pyclass]
+pub struct F1Metric;
+
+#[pyclass]
+pub struct PrecisionMetric;
+
+#[pyclass]
+pub struct RecallMetric;
+
+#[pyclass]
+pub struct ARIMetric;
+
+#[pyclass]
+pub struct NMIMetric;
+
+#[pyclass]
+pub struct VMeasureMetric;
+
+#[pyclass]
+pub struct BCubedPrecisionMetric;
+
+#[pyclass]
+pub struct BCubedRecallMetric;
+
+#[pyclass]
+pub struct EntropyMetric;
+
+#[pyclass]
+pub struct EntityCountMetric;
+
+#[pyclass]
+pub struct SHA256Op;
+
+#[pyclass]
+pub struct Blake3Op;
+
+#[pyclass]
+pub struct MD5Op;
+
+#[pyclass]
+pub struct SizeOp;
+
+#[pyclass]
+pub struct DensityOp;
+
+#[pyclass]
+pub struct FingerprintOp;
+
+// Nested class structure for metrics and operations
+#[pyclass]
+pub struct MetricsEval;
+
+#[pymethods]
+impl MetricsEval {
+    #[classattr]
+    fn f1() -> F1Metric { F1Metric }
+    
+    #[classattr]
+    fn precision() -> PrecisionMetric { PrecisionMetric }
+    
+    #[classattr]
+    fn recall() -> RecallMetric { RecallMetric }
+    
+    #[classattr]
+    fn ari() -> ARIMetric { ARIMetric }
+    
+    #[classattr]
+    fn nmi() -> NMIMetric { NMIMetric }
+    
+    #[classattr]
+    fn v_measure() -> VMeasureMetric { VMeasureMetric }
+    
+    #[classattr]
+    fn bcubed_precision() -> BCubedPrecisionMetric { BCubedPrecisionMetric }
+    
+    #[classattr]
+    fn bcubed_recall() -> BCubedRecallMetric { BCubedRecallMetric }
+}
+
+#[pyclass]
+pub struct MetricsStats;
+
+#[pymethods]
+impl MetricsStats {
+    #[classattr]
+    fn entropy() -> EntropyMetric { EntropyMetric }
+    
+    #[classattr]
+    fn entity_count() -> EntityCountMetric { EntityCountMetric }
+}
+
+#[pyclass]
+pub struct Metrics;
+
+#[pymethods]
+impl Metrics {
+    #[classattr]
+    fn eval() -> MetricsEval { MetricsEval }
+    
+    #[classattr]
+    fn stats() -> MetricsStats { MetricsStats }
+}
+
+#[pyclass]
+pub struct OpsHash;
+
+#[pymethods]
+impl OpsHash {
+    #[classattr]
+    fn sha256() -> SHA256Op { SHA256Op }
+    
+    #[classattr]
+    fn blake3() -> Blake3Op { Blake3Op }
+    
+    #[classattr]
+    fn md5() -> MD5Op { MD5Op }
+}
+
+#[pyclass]
+pub struct OpsCompute;
+
+#[pymethods]
+impl OpsCompute {
+    #[classattr]
+    fn size() -> SizeOp { SizeOp }
+    
+    #[classattr]
+    fn density() -> DensityOp { DensityOp }
+    
+    #[classattr]
+    fn fingerprint() -> FingerprintOp { FingerprintOp }
+}
+
+#[pyclass]
+pub struct Ops;
+
+#[pymethods]
+impl Ops {
+    #[classattr]
+    fn hash() -> OpsHash { OpsHash }
+    
+    #[classattr]
+    fn compute() -> OpsCompute { OpsCompute }
+}
+
 // Module definition
 #[pymodule]
 fn starlings(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -1132,13 +1323,33 @@ fn starlings(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyCollection>()?;
     m.add_class::<PyPartition>()?;
     m.add_class::<PyColExpression>()?;
+    m.add_class::<PyKey>()?;  // Python Key type
     
-    // Add metrics as module constants
-    m.add("f1", PyMetric::F1)?;
-    m.add("precision", PyMetric::Precision)?;
-    m.add("recall", PyMetric::Recall)?;
-    m.add("ari", PyMetric::ARI)?;
-    m.add("nmi", PyMetric::NMI)?;
+    // Add nested metrics and ops classes
+    m.add_class::<Metrics>()?;
+    m.add_class::<MetricsEval>()?;
+    m.add_class::<MetricsStats>()?;
+    m.add_class::<Ops>()?;
+    m.add_class::<OpsHash>()?;
+    m.add_class::<OpsCompute>()?;
+    
+    // Add the individual metric and operation types
+    m.add_class::<F1Metric>()?;
+    m.add_class::<PrecisionMetric>()?;
+    m.add_class::<RecallMetric>()?;
+    m.add_class::<ARIMetric>()?;
+    m.add_class::<NMIMetric>()?;
+    m.add_class::<VMeasureMetric>()?;
+    m.add_class::<BCubedPrecisionMetric>()?;
+    m.add_class::<BCubedRecallMetric>()?;
+    m.add_class::<EntropyMetric>()?;
+    m.add_class::<EntityCountMetric>()?;
+    m.add_class::<SHA256Op>()?;
+    m.add_class::<Blake3Op>()?;
+    m.add_class::<MD5Op>()?;
+    m.add_class::<SizeOp>()?;
+    m.add_class::<DensityOp>()?;
+    m.add_class::<FingerprintOp>()?;
     
     // Add col function
     m.add_function(wrap_pyfunction!(col, m)?)?;
@@ -1179,7 +1390,6 @@ impl BatchProcessor {
         for chunk in chunks {
             let hierarchy = PartitionHierarchy::from_edges(
                 chunk.collect(), 
-                self.num_records,
                 None  // No quantization by default
             );
             // Process hierarchy...

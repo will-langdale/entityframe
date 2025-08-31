@@ -384,6 +384,9 @@ To resolve the fundamental conflict between standalone collection encapsulation 
 **Memory efficiency through sharing**:
 When collections are combined into an EntityFrame, they share the same DataContext through Arc reference counting. This eliminates duplication while maintaining the ability for collections to exist independently. The append-only nature guarantees index stability, enabling lock-free concurrent reads.
 
+**Copy-on-Write for safe mutations**:
+When a collection that is a view (shares its DataContext with a frame) needs to be modified, it automatically triggers a Copy-on-Write operation. This creates a deep copy with its own DataContext, ensuring mutations don't affect the parent frame. This trade-off prioritises memory efficiency in the common read-heavy case while maintaining safety for mutations.
+
 **Automatic memory management**:
 When collections are removed from a frame, automatic compaction can reclaim unused space when garbage exceeds a threshold. This happens transparently without user intervention, maintaining the simplicity of the user-facing API while ensuring long-term memory efficiency. Float quantization can be explicitly enabled during hierarchy construction to reduce the number of distinct threshold levels, trading precision for memory efficiency.
 
@@ -396,7 +399,7 @@ When collections are removed from a frame, automatic compaction can reclaim unus
 - **Metric update**: O(k) where k is number of changed entities
 - **Full threshold sweep**: O(m·k) where m is number of merge events
 - **Storage**: O(m) where m is number of edges/merge events
-- **Memory in practice**: For 1M edges, expect 50-250MB depending on merge complexity
+- **Memory in practice**: For 1M edges, expect 60-115MB depending on merge complexity
 
 **Mathematical properties**
 

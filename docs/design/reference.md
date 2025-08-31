@@ -6,6 +6,51 @@
 
 The Starlings API design is inspired by [Polars](https://pola.rs/), adopting its expression-based approach for composable, efficient data operations. Like Polars, we provide a clear separation between data containers (EntityFrame/Collection) and operations (expressions), enabling users to build complex analyses from simple, chainable components. This design philosophy emphasizes being opinionated about the "right way" to do things while maintaining flexibility for advanced use cases.
 
+```python
+import starlings as sl  # Standard import convention used throughout
+```
+
+#### Core Types
+
+```python
+class Key:
+    """
+    A flexible key type that can hold integers, strings, or bytes.
+    
+    Automatically converts based on input type:
+    - int → stored as u32 or u64 based on size
+    - str → stored as string
+    - bytes → stored as bytes
+    
+    Example:
+        Key(123)         # u32
+        Key("cust_abc")  # string
+        Key(b"\\x00\\x01")  # bytes
+    """
+
+class Entity:
+    """
+    A resolved entity containing records from one or more sources.
+    
+    Note: Entity objects are created by Starlings when you access partition.entities.
+    You don't construct them directly - they're an export format for viewing resolved entities.
+    
+    Properties:
+        members: Set[Tuple[str, Key]] - Set of (source, key) pairs
+        size: int - Number of records in this entity
+        sources: Set[str] - Unique sources contributing to this entity
+    
+    Example:
+        entity.members = {
+            ("CRM", Key(123)),
+            ("CRM", Key(456)),
+            ("MailingList", Key("user_abc"))
+        }
+        entity.size = 3
+        entity.sources = {"CRM", "MailingList"}
+    """
+```
+
 #### Core EntityFrame Operations
 
 ```python
@@ -87,12 +132,11 @@ class EntityFrame:
         
         Args:
             *expressions: One or more sl.col() expressions
-            metrics: List of metrics to compute. Defaults to sl.report which 
-                     includes [f1, precision, recall, ari, nmi] for comparisons
-                     or [entity_count, entropy] for single collections.
-                     Available metrics: sl.f1, sl.precision, sl.recall, sl.ari, 
-                                      sl.nmi, sl.v_measure, sl.bcubed_precision,
-                                      sl.bcubed_recall, sl.entropy, sl.entity_count
+            metrics: List of metrics to compute. Defaults to eval metrics for comparisons
+                     (f1, precision, recall, ari, nmi) or stats metrics for single
+                     collections (entity_count, entropy).
+                     Available metrics: sl.Metrics.eval.* for comparisons,
+                                      sl.Metrics.stats.* for single collections
         
         Returns:
             Dict for point comparisons, DataFrame for sweeps
@@ -102,7 +146,7 @@ class EntityFrame:
             results = ef.analyse(
                 sl.col("splink").at(0.85),
                 sl.col("ground_truth").at(1.0),
-                metrics=[sl.f1, sl.precision, sl.recall]
+                metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision, sl.Metrics.eval.recall]
             )
             
             # Sweep analysis
@@ -172,10 +216,13 @@ class Collection:
     through Copy-on-Write, creating its own DataContext.
     """
     
+    @property
+    def is_view(self) -> bool:
+        """Whether this collection is a view sharing data with a frame."""
+    
     @classmethod
     def from_edges(cls,
                   edges: List[Tuple[Any, Any, float]],
-                  num_records: Optional[int] = None,
                   quantize: Optional[int] = None) -> 'Collection':
         """
         Build collection from weighted edges.
@@ -183,7 +230,7 @@ class Collection:
         Args:
             edges: List of (record_i, record_j, similarity) tuples
                   Records can be any hashable type (int, str, bytes)
-            num_records: Total number of records (auto-detected if None)
+                  Raw values are automatically wrapped in Key objects
             quantize: Optional decimal places to round thresholds to
                      (e.g., quantize=4 rounds to 0.0001 precision)
             
@@ -268,7 +315,7 @@ class Collection:
     
     def sweep(self, start: float = 0.0, 
              stop: float = 1.0, 
-             step: float = 0.01) -> pd.DataFrame:
+             step: float = 0.01) -> List[Dict[str, Any]]:
         """
         Analyse collection across threshold range.
         
@@ -276,19 +323,21 @@ class Collection:
             Uses incremental O(k) updates between thresholds.
         
         Returns:
-            DataFrame with stability analysis
+            List of dictionaries, one per threshold
             
         Example:
             analysis = collection.sweep(0.5, 0.95)
-            analysis.plot(x='threshold', y='entity_count')
+            # Returns [{"threshold": 0.5, "entity_count": 100}, ...]
         """
     
     def copy(self) -> 'Collection':
         """
         Create an owned copy of this collection.
         
-        If collection is a view from an EntityFrame, creates a deep copy
-        with its own DataContext. If already owned, returns a copy.
+        If collection is a view from an EntityFrame, triggers Copy-on-Write
+        to create a deep copy with its own DataContext. This enables safe
+        mutation without affecting the parent frame, at the cost of duplicating
+        the underlying data.
         
         Returns:
             New Collection with independent data
@@ -335,19 +384,21 @@ class col:
         """
 
 # Pre-defined metrics as module constants (injectable functions)
-f1 = F1Metric()
-precision = PrecisionMetric()
-recall = RecallMetric()
-ari = ARIMetric()
-nmi = NMIMetric()
-v_measure = VMeasureMetric()
-bcubed_precision = BCubedPrecisionMetric()
-bcubed_recall = BCubedRecallMetric()
-entropy = EntropyMetric()
-entity_count = EntityCountMetric()
-
-# Default metric bundle
-report = [f1, precision, recall, ari, nmi]
+# Accessed via sl.Metrics.eval.* and sl.Metrics.stats.*
+class Metrics:
+    class eval:
+        f1 = F1Metric()
+        precision = PrecisionMetric()
+        recall = RecallMetric()
+        ari = ARIMetric()
+        nmi = NMIMetric()
+        v_measure = VMeasureMetric()
+        bcubed_precision = BCubedPrecisionMetric()
+        bcubed_recall = BCubedRecallMetric()
+    
+    class stats:
+        entropy = EntropyMetric()
+        entity_count = EntityCountMetric()
 ```
 
 #### Partition Operations
@@ -359,33 +410,33 @@ class Partition:
     """
     
     @property
-    def entities(self) -> List[Entity]:
-        """List of entities in this partition."""
+    def entities(self) -> Set[Entity]:
+        """Set of entities in this partition (unordered)."""
     
     @property
     def num_entities(self) -> int:
         """Number of entities in this partition."""
     
-    def map(self, func: Union[str, Callable]) -> Dict[int, Any]:
+    def map(self, func: Union[Callable, 'Operation']) -> Dict[int, Any]:
         """
         Apply function to each entity.
         
         Args:
-            func: Either a built-in operation name or callable
-                  Built-ins: sl.hash.sha256, sl.hash.blake3, sl.ops.size
+            func: Either a built-in operation or callable
+                  Built-ins: sl.Ops.hash.sha256, sl.Ops.compute.size, etc.
                   
         Returns:
             Dictionary mapping entity ID to result
             
         Example:
             # Built-in hash function (runs in parallel Rust)
-            hashes = partition.map(sl.hash.sha256)
+            hashes = partition.map(sl.Ops.hash.sha256)
             
             # Custom Python function
             custom = partition.map(lambda e: len(e.members) * 2)
         """
     
-    def to_list(self) -> List[Set[Tuple[str, Any]]]:
+    def to_list(self) -> List[Set[Tuple[str, Key]]]:
         """
         Export entities as list of sets.
         
@@ -395,8 +446,8 @@ class Partition:
         Example:
             entities = partition.to_list()
             # [
-            #   {("CRM", "123"), ("CRM", "456")},
-            #   {("MailingList", "789")}
+            #   {("CRM", Key(123)), ("CRM", Key(456))},
+            #   {("MailingList", Key(789))}
             # ]
         """
 ```
@@ -404,18 +455,32 @@ class Partition:
 ### Built-in Operations
 
 ```python
-# Hash operations (parallel execution in Rust)
-class hash:
-    sha256 = "hash:sha256"
-    sha512 = "hash:sha512"
-    md5 = "hash:md5"
-    blake3 = "hash:blake3"
+# Operations for partition.map() (parallel execution in Rust)
+# Accessed via sl.Ops.hash.* and sl.Ops.compute.*
+class Ops:
+    class hash:
+        sha256 = SHA256Op()
+        sha512 = SHA512Op()
+        md5 = MD5Op()
+        blake3 = Blake3Op()
+    
+    class compute:
+        size = SizeOp()      # Number of records in entity
+        density = DensityOp() # Internal connectivity
+        fingerprint = FingerprintOp() # MinHash or similar
+```
 
-# Entity operations
-class ops:
-    size = "ops:size"  # Number of records in entity
-    density = "ops:density"  # Internal connectivity
-    fingerprint = "ops:fingerprint"  # MinHash or similar
+### Error Handling
+
+```python
+# Exception hierarchy
+class StarlingsError(Exception):
+    """Base exception for all Starlings errors"""
+
+class InvalidThresholdError(StarlingsError):
+    """Threshold outside [0, 1] range"""
+
+# ... other specific error types
 ```
 
 ### Data Shape Specifications
@@ -475,14 +540,17 @@ collection = sl.Collection.from_merge_events(merges, num_records=10)
 ### Serialisation Format
 
 ```python
-# EntityFrame Arrow schema with dictionary encoding for efficiency
+# EntityFrame Arrow schema with optimal dictionary encoding
 schema = pa.schema([
-    # Records with dictionary-encoded sources
-    ("records", pa.list_(pa.struct([
-        ("source", pa.dictionary(pa.int16(), pa.string())),
-        ("key", pa.string()),  # Changed from local_id
-        ("record_index", pa.uint32())
+    # Parallel arrays for maximum deduplication efficiency
+    ("record_sources", pa.dictionary(pa.int16(), pa.string())),  # Global source dictionary
+    ("record_keys", pa.dictionary(pa.int32(), pa.dense_union([   # Dictionary of unions!
+        pa.field("u32", pa.uint32()),
+        pa.field("u64", pa.uint64()),
+        pa.field("string", pa.string()),  # No nested dictionary needed
+        pa.field("bytes", pa.binary())
     ]))),
+    ("record_indices", pa.uint32()),  # Simple array of indices
     
     # Collections with merge events
     ("collections", pa.list_(pa.struct([
@@ -550,6 +618,7 @@ CREATE TABLE merge_affected_records (
 ```python
 import splink
 import starlings as sl
+import polars as pl
 
 # Run Splink
 linker = splink.Linker(df, settings)
@@ -567,10 +636,13 @@ ef.add_collection("splink_output", edges=edges)
 sweep_results = ef.analyse(
     sl.col("splink_output").sweep(0.5, 0.95, 0.01),
     sl.col("ground_truth").at(1.0),
-    metrics=[sl.f1, sl.precision, sl.recall]
+    metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision, sl.Metrics.eval.recall]
 )
+# Returns list of dicts: [{"threshold": 0.5, "f1": 0.72, ...}, ...]
 
-optimal_row = sweep_results.loc[sweep_results['f1'].idxmax()]
+# Convert to polars for analysis
+df_results = pl.from_dicts(sweep_results)
+optimal_row = df_results.filter(pl.col("f1") == pl.col("f1").max()).row(0, named=True)
 print(f"Optimal threshold: {optimal_row['threshold']:.2f} (F1={optimal_row['f1']:.3f})")
 ```
 
@@ -593,16 +665,23 @@ sweep_results = ef.analyse(
     sl.col("truth").at(1.0)
 )
 
-# Or extract partition for er-evaluation
+# Or extract partition for er-evaluation  
 partition = ef["predicted"].at(0.85)
 clusters = partition.to_list()
 metrics = er_eval.evaluate(clusters, true_clusters)
+
+# Also supports American spelling
+comparison = ef.analyze(
+    sl.col("predicted").at(0.85),
+    sl.col("truth").at(1.0)
+)
 ```
 
 ### Integration with Matchbox
 
 ```python
 import starlings as sl
+import polars as pl
 from matchbox import MatchboxClient
 
 # Get Matchbox results
@@ -617,16 +696,20 @@ ef = sl.from_records("dataset", records)
 ef.add_collection("matchbox", edges=edges)
 
 # Find optimal threshold
-optimal_results = ef.analyse(
+sweep_results = ef.analyse(
     sl.col("matchbox").sweep(0.7, 0.95),
     sl.col("truth").at(1.0),
-    metrics=[sl.f1]
+    metrics=[sl.Metrics.eval.f1]
 )
-optimal_threshold = optimal_results.loc[optimal_results['f1'].idxmax(), 'threshold']
+# Convert to polars and find optimal
+df_results = pl.from_dicts(sweep_results)
+optimal_threshold = df_results.filter(
+    pl.col("f1") == pl.col("f1").max()
+).select("threshold")[0, 0]
 
 # Export with hashes at optimal threshold
 partition = ef["matchbox"].at(optimal_threshold)
-hashes = partition.map(sl.hash.sha256)
+hashes = partition.map(sl.Ops.hash.sha256)
 
 matchbox_data = {
     'entities': partition.to_list(),
@@ -654,8 +737,8 @@ pq.write_table(arrow_table, "starlings_frame.parquet")
 table = pq.read_table("starlings_frame.parquet")
 ef = sl.EntityFrame.from_arrow(table)
 
-# The Arrow format uses dictionary encoding for efficiency
-# Sources and collection names are automatically deduplicated
+# The Arrow format uses optimal dictionary encoding for efficiency
+# Sources and keys are automatically deduplicated at the global level
 ```
 
 ## Implementation Roadmap
@@ -847,7 +930,7 @@ class StarlingsBenchmark:
     def benchmark_entity_hashing(self, collection):
         partition = collection.at(0.85)
         start = time.time()
-        hashes = partition.map(sl.hash.blake3)
+        hashes = partition.map(sl.Hash.blake3)
         return time.time() - start
 ```
 
@@ -875,10 +958,14 @@ partition = ef["resolved"].at(0.7)  # O(m) first time, O(1) after
 partition = ef["resolved"].at(0.85)  # O(1) if cached
 
 # Efficient sweep with incremental updates
-results = ef.analyse(
+sweep_results = ef.analyse(
     sl.col("resolved").sweep(0.5, 0.95),
     sl.col("truth").at(1.0)
-)  # O(k) between thresholds
+)  # Returns List[Dict], O(k) between thresholds
+
+# Can convert to polars if needed
+import polars as pl
+df = pl.from_dicts(sweep_results)
 ```
 
 ### From Multiple Resolution Attempts
@@ -904,7 +991,7 @@ comparison = ef.analyse(
     sl.col("splink").at(0.85),
     sl.col("dedupe").at(0.76),
     sl.col("truth").at(1.0),
-    metrics=[sl.f1, sl.precision, sl.recall]
+    metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision, sl.Metrics.eval.recall]
 )
 
 # Find optimal thresholds efficiently
