@@ -1,16 +1,22 @@
-# Starlings Design Document C: Reference Architecture
+# Starlings Python interface
 
-## Complete API Reference
+This document provides the complete API reference, integration guides, and usage patterns for the Starlings Python library. It shows how to use Starlings for entity resolution workflows, from basic threshold exploration to complex multi-stage hierarchical resolution.
+
+## API design philosophy
+
+The Starlings API follows the Polars pattern of separating data containers from operations through composable expressions. This enables intuitive, chainable operations whilst maintaining performance through lazy evaluation and pushed-down optimisations.
+
+## Complete API reference
 
 ### Python API
 
-The Starlings API design is inspired by [Polars](https://pola.rs/), adopting its expression-based approach for composable, efficient data operations. Like Polars, we provide a clear separation between data containers (EntityFrame/Collection) and operations (expressions), enabling users to build complex analyses from simple, chainable components. This design philosophy emphasizes being opinionated about the "right way" to do things while maintaining flexibility for advanced use cases.
+The Starlings API design is inspired by [Polars](https://pola.rs/), adopting its expression-based approach for composable, efficient data operations. Like Polars, we provide a clear separation between data containers (EntityFrame/Collection) and operations (expressions), enabling users to build complex analyses from simple, chainable components. This design philosophy emphasises being opinionated about the "right way" to do things whilst maintaining flexibility for advanced use cases.
 
 ```python
 import starlings as sl  # Standard import convention used throughout
 ```
 
-#### Core Types
+### Core types
 
 ```python
 class Key:
@@ -60,7 +66,7 @@ class Entity:
     """
 ```
 
-#### Core EntityFrame Operations
+### Core EntityFrame operations
 
 ```python
 import starlings as sl
@@ -264,7 +270,7 @@ class EntityFrame:
         """
 ```
 
-#### Collection Operations
+### Collection operations
 
 ```python
 class Collection:
@@ -426,7 +432,7 @@ class Collection:
         """
 ```
 
-#### Expression API
+### Expression API
 
 ```python
 # Expression builders for analyse() method
@@ -479,7 +485,7 @@ class Metrics:
         entity_count = EntityCountMetric()
 ```
 
-#### Partition Operations
+### Partition operations
 
 ```python
 class Partition:
@@ -530,7 +536,7 @@ class Partition:
         """
 ```
 
-### Built-in Operations
+## Built-in operations
 
 ```python
 # Operations for partition.map() (parallel execution in Rust)
@@ -548,7 +554,7 @@ class Ops:
         fingerprint = FingerprintOp() # MinHash or similar
 ```
 
-### Error Handling
+## Error handling
 
 ```python
 # Exception hierarchy
@@ -561,9 +567,9 @@ class InvalidThresholdError(StarlingsError):
 # ... other specific error types
 ```
 
-### Data Shape Specifications
+## Data shape specifications
 
-#### Input Formats for from_records()
+### Input formats for from_records()
 
 ```python
 # DataFrame input
@@ -586,7 +592,7 @@ table = pa.Table.from_pandas(df)
 ef = sl.from_records("OrderSystem", table, key_column='customer_id')
 ```
 
-#### Input Formats for Collections
+### Input formats for collections
 
 ```python
 # From edges (record pairs with similarities)
@@ -620,7 +626,7 @@ entities = [
 collection = sl.Collection.from_entities(entities)
 ```
 
-### Performance Characteristics
+## Performance characteristics
 
 Clear distinction between different operation types:
 
@@ -636,7 +642,7 @@ Where:
 - k = number of entities affected by threshold change
 - Cache size is fixed at 10 partitions per hierarchy in v1
 
-### Key Conversion Strategy
+## Key conversion strategy
 
 For optimal performance, Keys undergo conversion at different points:
 - **Python level**: `Key` objects can hold int, str, or bytes
@@ -644,11 +650,11 @@ For optimal performance, Keys undergo conversion at different points:
 - **Rust level**: Work with primitive u32 indices for speed
 - **Storage**: Only the DataContext maintains the actual Key values
 
-This strategy minimizes overhead during computation-intensive hierarchy operations while preserving the flexibility of the Python API.
+This strategy minimises overhead during computation-intensive hierarchy operations whilst preserving the flexibility of the Python API.
 
-## Arrow Schema
+## Arrow schema
 
-### Serialisation Format
+### Serialisation format
 
 ```python
 # EntityFrame Arrow schema with optimal dictionary encoding
@@ -680,7 +686,7 @@ schema = pa.schema([
 ])
 ```
 
-### Database Decomposition
+### Database decomposition
 
 The Arrow format can be decomposed into relational tables:
 
@@ -722,7 +728,7 @@ CREATE TABLE merge_affected_records (
 );
 ```
 
-## Hierarchical Resolution Workflow
+## Hierarchical resolution workflow
 
 When working with pre-grouped entities (e.g., from previous resolution stages), Starlings supports hierarchical resolution:
 
@@ -755,7 +761,7 @@ final_collection = sl.Collection.from_edges(
 
 This workflow enables multi-stage resolution where early stages handle within-source deduplication and later stages handle cross-source linkage.
 
-### Integration with Splink
+## Integration with Splink
 
 ```python
 import splink
@@ -788,7 +794,7 @@ optimal_row = df_results.filter(pl.col("f1") == pl.col("f1").max()).row(0, named
 print(f"Optimal threshold: {optimal_row['splink_output_threshold']:.2f} (F1={optimal_row['f1']:.3f})")
 ```
 
-### Integration with er-evaluation
+## Integration with er-evaluation
 
 ```python
 import er_evaluation as er_eval
@@ -822,7 +828,7 @@ comparison = ef.analyze(
 )
 ```
 
-### Integration with Matchbox
+## Integration with Matchbox
 
 ```python
 import starlings as sl
@@ -864,7 +870,7 @@ matchbox_data = {
 client.upload_results(matchbox_data)
 ```
 
-### Apache Arrow Integration
+## Apache Arrow integration
 
 ```python
 import pyarrow as pa
@@ -886,7 +892,7 @@ ef = sl.EntityFrame.from_arrow(table)
 # Sources and keys are automatically deduplicated at the global level
 ```
 
-## Implementation Roadmap
+## Implementation roadmap
 
 ### Phase 1: Foundation (Months 1-3)
 **Goal**: Core functionality with single collection
@@ -914,7 +920,7 @@ ef = sl.EntityFrame.from_arrow(table)
 
 **Deliverable**: Working single-collection Starlings with basic Python API
 
-### Phase 2: Multi-collection & Analytics (Months 4-6)
+### Phase 2: Multi-collection & analytics (Months 4-6)
 **Goal**: Multiple collections and comprehensive metrics
 
 - Week 1-3: Multi-collection support
@@ -941,7 +947,7 @@ ef = sl.EntityFrame.from_arrow(table)
 
 **Deliverable**: Full multi-collection comparison capabilities
 
-### Phase 3: Batch Performance Optimisation (Months 7-9)
+### Phase 3: Batch performance optimisation (Months 7-9)
 **Goal**: Production-ready batch processing performance
 
 - Week 1-3: Parallelisation
@@ -969,7 +975,7 @@ ef = sl.EntityFrame.from_arrow(table)
 
 **Deliverable**: 10-100x performance improvement for batch operations
 
-### Phase 4: Integration & Polish (Months 10-12)
+### Phase 4: Integration & polish (Months 10-12)
 **Goal**: Ecosystem integration and production features
 
 - Week 1-3: Tool integrations
@@ -996,9 +1002,9 @@ ef = sl.EntityFrame.from_arrow(table)
 
 **Deliverable**: Production-ready Starlings 1.0
 
-## Performance Benchmarks
+## Performance benchmarks
 
-### Target Performance Metrics
+### Target performance metrics
 
 ```yaml
 # Single machine performance targets
@@ -1034,7 +1040,7 @@ complexity:
   memory: O(m) for merge events + O(c × n) for c cached partitions
 ```
 
-### Benchmark Suite
+### Benchmark suite
 
 ```python
 # Performance testing harness
@@ -1084,9 +1090,9 @@ class StarlingsBenchmark:
         return time.time() - start
 ```
 
-## Migration Guide
+## Migration guide
 
-### From Pandas DataFrame Resolution
+### From pandas DataFrame resolution
 
 ```python
 # Before: Manual threshold management
@@ -1119,7 +1125,7 @@ import polars as pl
 df = pl.from_dicts(sweep_results)
 ```
 
-### From Multiple Resolution Attempts
+### From multiple resolution attempts
 
 ```python
 # Before: Separate scripts for each method
@@ -1158,7 +1164,7 @@ df = pl.from_dicts(splink_sweep)
 optimal = df.filter(df['f1'] == df['f1'].max()).row(0, named=True)
 ```
 
-### Important Notes on Performance
+### Important notes on performance
 
 1. **First partition access**: Reconstructs from merge events O(m)
 2. **Subsequent accesses**: Use cache O(1)

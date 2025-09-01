@@ -1,14 +1,16 @@
-# Starlings Design Document A: Core Design & Mathematics
+# Starlings mathematical principles
 
-## Executive Summary
+This document establishes the mathematical foundations and theoretical guarantees of the Starlings entity resolution framework. It defines the core abstractions, proves key properties, and demonstrates why the hierarchy-based approach enables capabilities that traditional clustering methods cannot provide.
 
-Starlings represents a paradigm shift in entity resolution infrastructure. **Rather than forcing threshold decisions at processing time, Starlings captures the complete hierarchical structure of entity formation, enabling instant exploration of the entire resolution space.** This revolutionary approach achieves 10-100x performance improvements for threshold analysis while providing unprecedented insight into entity stability and formation patterns.
+## Executive summary
+
+Starlings represents a paradigm shift in entity resolution infrastructure. **Rather than forcing threshold decisions at processing time, Starlings captures the complete hierarchical structure of entity formation, enabling instant exploration of the entire resolution space.** This revolutionary approach achieves 10-100x performance improvements for threshold analysis whilst providing unprecedented insight into entity stability and formation patterns.
 
 The framework's core innovation lies in representing entity resolution outputs as hierarchical structures that generate partitions at any threshold. This enables O(k) incremental metric computation across thresholds (where k = affected entities), O(m) storage for infinite threshold granularity (where m = number of edges), and natural support for entity data at any confidence level. By storing the complete resolution space, Starlings becomes the universal transport format for entity resolution - preserving all information needed for downstream analysis and decision-making.
 
 Starlings supports multiple collections within a single frame, enabling direct comparison of different resolution approaches. Each collection is a hierarchy representing one attempt at resolving the same underlying records, whether from different algorithms, parameter settings, or confidence thresholds. This multi-collection architecture is fundamental to Starlings's value proposition: finding optimal resolution strategies through systematic comparison.
 
-## Core Design Principles
+## Core design principles
 
 ### Incremental computation: no work thrown away
 Every computation in Starlings builds upon previous work. When moving between thresholds, we update only what changes rather than recomputing from scratch. This principle drives our O(k) metric updates (where k = affected entities) and makes complete threshold analysis computationally feasible.
@@ -28,9 +30,9 @@ The hierarchy preserves all information needed for threshold decisions. Users ca
 ### Optimised simplicity
 We choose simple, correct solutions and optimise them using Rust's low-level control. RoaringBitmaps for set operations, sparse matrices where naturally sparse, SIMD where beneficial - but no premature optimisation that adds complexity without clear benefit.
 
-## User Requirements and Stories
+## User requirements and stories
 
-### Core Analysis Requirements
+### Core analysis requirements
 
 **1. Optimal threshold discovery**
 *"I want to compare my new collection with an existing one at every threshold to figure out where to resolve it to truth"*
@@ -56,7 +58,7 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Identify stable vs unstable regions
 - Find critical merge points
 
-### Scale and Performance Requirements
+### Scale and performance requirements
 
 **5. Million-record scale**
 *"Handle millions of records without memory explosion"*
@@ -67,7 +69,7 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 
 **6. Batch processing excellence**
 *"Process large datasets efficiently in batch mode"*
-- Optimized batch hierarchy construction
+- Optimised batch hierarchy construction
 - Parallel processing capabilities
 - Memory-mapped storage for out-of-core processing
 
@@ -77,10 +79,10 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Monitoring and observability
 - Clear scaling boundaries and expectations
 
-### Integration and Collaboration Requirements
+### Integration and collaboration requirements
 
 **8. Data transport and serialisation**
-*"Share entity resolution results while preserving all information"*
+*"Share entity resolution results whilst preserving all information"*
 - Arrow format for interoperability
 - Preserve complete resolution space
 - Enable collaborative threshold selection
@@ -98,7 +100,7 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Track source attribution
 - Support heterogeneous key types (u32, u64, String, bytes)
 
-### Decision Support Requirements
+### Decision support requirements
 
 **11. Deferred threshold decisions**
 *"Don't force threshold choices until I have enough information"*
@@ -118,7 +120,7 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Enable custom metric definitions
 - Provide confidence intervals
 
-### Strategic Requirements
+### Strategic requirements
 
 **14. Foundation for multiple projects**
 *"Underpin different entity resolution projects with one framework"*
@@ -159,9 +161,7 @@ We choose simple, correct solutions and optimise them using Rust's low-level con
 - Preserve provenance from multiple resolution stages
 - Enable hierarchical resolution workflows
 
-## Layer 1: Mathematical Foundations
-
-### The Multi-Collection Entity Model
+## The multi-collection entity model
 
 **Core representation: multiple hierarchies, shared records**
 
@@ -174,7 +174,7 @@ An EntityFrame `F` is formally defined as: `F = (R, {H₁, H₂, ..., Hₙ}, I)`
 
 Each hierarchy `Hᵢ` represents a complete entity resolution attempt over the record space `R`. Collections can be constructed from two primary input formats: weighted edges (the most common) or pre-resolved entity sets. Merge events are an internal representation not exposed as a construction method.
 
-### Entity Representation: Sets of Interned References
+## Entity representation: sets of interned references
 
 **The fundamental entity structure**
 
@@ -201,7 +201,7 @@ To prevent explosive growth in string storage, Starlings interns all source iden
 - References become compact tuples: (0, 1), (0, 9), (1, 17), (2, 42)
 - Typical compression: 80-90% reduction in memory usage
 
-### Hierarchical Partitions
+## Hierarchical partitions
 
 **Hierarchy generates partitions at any threshold**
 
@@ -215,13 +215,13 @@ Each collection's hierarchy `H` consists of partition levels: `H = {(t₁, P₁)
 2. **Partition monotonicity**: If `t₁ < t₂`, then `P(t₁)` is a refinement of `P(t₂)`
 3. **Completeness**: Every record appears in exactly one entity at any threshold
 
-### Hierarchy Construction via Connected Components
+## Hierarchy construction via connected components
 
 **Threshold-based connected components approach**
 
 Starlings uses threshold-based connected components to build hierarchies from pairwise similarities. This is algorithmically equivalent to single-linkage clustering but more natural for entity resolution. 
 
-**Important Note on Single-Linkage Behaviour**: The use of single-linkage clustering is a deliberate design choice that aligns with Starlings's core philosophy. While single-linkage can exhibit the "chaining effect" where disparate clusters merge through intermediate links, this is actually a feature, not a bug. Starlings preserves the complete resolution space, including these chaining patterns, allowing users to observe and make informed decisions about where to cut the hierarchy. The goal is not to find the "best" clusters automatically, but to capture the raw connectivity structure so users can explore and choose appropriate thresholds based on their specific requirements.
+**Important note on single-linkage behaviour**: The use of single-linkage clustering is a deliberate design choice that aligns with Starlings's core philosophy. Whilst single-linkage can exhibit the "chaining effect" where disparate clusters merge through intermediate links, this is actually a feature, not a bug. Starlings preserves the complete resolution space, including these chaining patterns, allowing users to observe and make informed decisions about where to cut the hierarchy. The goal is not to find the "best" clusters automatically, but to capture the raw connectivity structure so users can explore and choose appropriate thresholds based on their specific requirements.
 
 Starlings requires all pairwise relationships to be expressed as similarity scores in [0,1], where higher values indicate stronger matches. Distance metrics must be converted to similarities before ingestion.
 
@@ -234,19 +234,19 @@ Starlings requires all pairwise relationships to be expressed as similarity scor
 
 **Complexity analysis**: O(m log m) where m is the number of edges. For practical entity resolution with blocking/LSH preprocessing, m is typically O(n) to O(n log n), not O(n²).
 
-### Fixed-Point Threshold Representation
+## Fixed-point threshold representation
 
-To ensure robust threshold comparisons and avoid floating-point equality issues, Starlings uses fixed-point representation internally while maintaining a float API:
+To ensure robust threshold comparisons and avoid floating-point equality issues, Starlings uses fixed-point representation internally whilst maintaining a float API:
 
 **Internal representation**: Thresholds are stored as 32-bit integers by multiplying by 10⁶ and rounding. This provides 6 decimal places of precision - more than sufficient for any similarity score.
 
-**Quantization policy**: All hierarchies require explicit quantization (default: 6 decimal places). This prevents float comparison bugs and ensures predictable memory usage. Users can specify 1-6 decimal places based on their precision needs.
+**Quantisation policy**: All hierarchies require explicit quantisation (default: 6 decimal places). This prevents float comparison bugs and ensures predictable memory usage. Users can specify 1-6 decimal places based on their precision needs.
 
 **Example**: User threshold 0.85 → Internal key 850000 → Exact equality comparisons
 
-This design choice eliminates an entire class of floating-point comparison bugs while maintaining the intuitive float API that users expect.
+This design choice eliminates an entire class of floating-point comparison bugs whilst maintaining the intuitive float API that users expect.
 
-### N-way Merges and Real-World Patterns
+## N-way merges and real-world patterns
 
 **Natural n-way merge representation**
 
@@ -261,7 +261,7 @@ Threshold 0.9: [{A,B,C,D}]  // 4-way merge, not sequential binary merges
 
 The union-find algorithm naturally handles these n-way merges without forcing artificial binary tree structures.
 
-### Incremental Metric Computation
+## Incremental metric computation
 
 **The mathematical foundation for efficiency**
 
@@ -283,7 +283,7 @@ N_{ij}(t + Δt) = N_{ij}(t) + ΔN_{ij}
 
 This enables O(k) updates for metrics like ARI and NMI as we move between thresholds, where k is the number of affected entities.
 
-### Complete Mathematical Operation Space
+## Complete mathematical operation space
 
 **Pairwise classification metrics**
 - **Precision**: `P(t) = |TP(t)| / (|TP(t)| + |FP(t)|)`
@@ -338,7 +338,7 @@ Unique to hierarchical representation:
 - **Stability score**: `S(t₁, t₂) = |P(t₁) ∩ P(t₂)| / |P(t₁) ∪ P(t₂)|`
 - **Resolution entropy**: `H(t) = -Σᵢ (|Eᵢ|/|R|) log(|Eᵢ|/|R|)`
 
-### Multi-Collection Comparison
+## Multi-collection comparison
 
 **Cross-collection analysis**
 
@@ -361,7 +361,7 @@ Consensus(t₁, ..., tₙ) = argmin_P Σᵢ d(P, Cᵢ(tᵢ))
 ```
 Where each collection Cᵢ uses its own calibrated threshold tᵢ.
 
-### Information-Theoretic Framework
+## Information-theoretic framework
 
 **Hierarchy as information preservation**
 
@@ -385,7 +385,7 @@ MI(C₁, t₁, C₂, t₂) = Σᵢⱼ p(i,j) log(p(i,j)/(p₁(i)p₂(j)))
 ```
 Mutual information between two collections at their respective thresholds.
 
-### Memory Architecture: Contextual Ownership
+## Memory architecture: contextual ownership
 
 **Solving the multi-collection memory challenge**
 
@@ -397,15 +397,15 @@ To resolve the fundamental conflict between standalone collection encapsulation 
 - **PartitionHierarchy**: The merge event structure that references its DataContext to know the complete record space. This reference ensures isolates are properly included as singleton entities during partition reconstruction.
 
 **Memory efficiency through sharing**:
-When collections are combined into an EntityFrame, they share the same DataContext through Arc reference counting. This eliminates duplication while maintaining the ability for collections to exist independently. The append-only nature guarantees index stability, enabling lock-free concurrent reads.
+When collections are combined into an EntityFrame, they share the same DataContext through Arc reference counting. This eliminates duplication whilst maintaining the ability for collections to exist independently. The append-only nature guarantees index stability, enabling lock-free concurrent reads.
 
 **Simplified ownership model**:
-Collection views obtained from EntityFrames via `ef["name"]` are immutable - they provide read-only access to the hierarchy. All modifications must go through the EntityFrame's methods (e.g., `ef.add_collection_from_edges()`). To create a mutable standalone collection from a view, use the explicit `copy()` method, which creates a deep copy with its own DataContext. This eliminates the complexity of implicit Copy-on-Write while maintaining safety and clarity.
+Collection views obtained from EntityFrames via `ef["name"]` are immutable - they provide read-only access to the hierarchy. All modifications must go through the EntityFrame's methods (e.g., `ef.add_collection_from_edges()`). To create a mutable standalone collection from a view, use the explicit `copy()` method, which creates a deep copy with its own DataContext. This eliminates the complexity of implicit Copy-on-Write whilst maintaining safety and clarity.
 
 **Automatic memory management**:
-When collections are removed from a frame, automatic compaction can reclaim unused space when garbage exceeds a threshold. This happens transparently without user intervention, maintaining the simplicity of the user-facing API while ensuring long-term memory efficiency.
+When collections are removed from a frame, automatic compaction can reclaim unused space when garbage exceeds a threshold. This happens transparently without user intervention, maintaining the simplicity of the user-facing API whilst ensuring long-term memory efficiency.
 
-### Theoretical Guarantees
+## Theoretical guarantees
 
 **Computational complexity**
 
