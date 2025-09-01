@@ -7,21 +7,21 @@
 
 ### Task 1.1: Core Types & Data Structures
 
-**Create files**:
-- `rust/starlings-core/src/core/key.rs`
-- `rust/starlings-core/src/core/record.rs`
-- `rust/starlings-core/src/core/data_context.rs`
-- `rust/starlings-core/src/core/mod.rs`
+**Create files**: ✅ COMPLETED
+- ✅ `src/rust/starlings/src/core/key.rs`
+- ✅ `src/rust/starlings/src/core/record.rs`
+- ✅ `src/rust/starlings/src/core/data_context.rs`
+- ✅ `src/rust/starlings/src/core/mod.rs`
 
-**Implement**:
-- [ ] Key enum with U32, U64, String, Bytes variants
-- [ ] InternedRecord struct with source_id, key, attributes
-- [ ] DataContext with records Vec, source_interner, identity_map, source_index
-- [ ] DataContext::ensure_record() method for deduplication
-- [ ] Unit tests: key equality, record deduplication, index stability
-- [ ] Benchmark: 10k unique record insertions using criterion
+**Implement**: ✅ COMPLETED
+- ✅ Key enum with U32, U64, String, Bytes variants
+- ✅ InternedRecord struct with source_id, key, attributes
+- ✅ DataContext with records Vec, source_interner, identity_map, source_index
+- ✅ DataContext::ensure_record() method for deduplication
+- ✅ Unit tests: key equality, record deduplication, index stability
+- ✅ Benchmark: 10k unique record insertions using criterion
 
-**Dependencies**: roaring, fxhash, string-interner  
+**Dependencies**: ✅ COMPLETED - roaring, fxhash, string-interner  
 **Reference**: `algorithms.md` - Core data structure architecture
 
 ### Task 1.2: Hierarchy Construction
