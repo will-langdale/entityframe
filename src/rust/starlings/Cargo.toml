@@ -18,6 +18,8 @@ blake3 = "1.5"
 hex = "0.4"
 rayon = "1.10"
 comfy-table = "7.1"
+string-interner = "0.17"
+fxhash = "0.2"
 
 [features]
 extension-module = ["pyo3/extension-module"]
@@ -25,3 +27,8 @@ default = ["extension-module"]
 
 [dev-dependencies]
 pyo3 = { version = "0.23", features = ["auto-initialize"] }
+criterion = "0.5"
+
+[[bench]]
+name = "record_insertion"
+harness = false
