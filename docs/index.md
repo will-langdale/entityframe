@@ -1,5 +1,7 @@
 # Starlings
 
+![The Starlings logo](./assets/starling-logo.png){ width="300" }
+
 **High-performance entity resolution evaluation and transport for Python**
 
 Ever wondered if your entity resolution is actually working? Or spent hours recomputing clusters just to test different thresholds? Starlings lets you explore the entire resolution space instantly—because sometimes you need to know whether 0.85 or 0.87 is the magic number that makes everything click.

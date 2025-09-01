@@ -15,8 +15,8 @@ nav:
 
 theme:
   name: material
-  icon:
-    logo: material/bird
+  logo: assets/starling-logo.png
+  favicon: assets/starling-logo.png
   features:
     - content.code.copy
     - navigation.sections
