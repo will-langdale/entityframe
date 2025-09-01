@@ -122,6 +122,10 @@ These are marker types that route to optimised Rust implementations, providing b
 
 ## Document structure
 
+### Document audience
+
+These design documents are technical specifications for engineers and AI agents implementing Starlings. They are NOT user documentation. References to "users" throughout these documents mean developers using the Starlings library, not end users of applications built with Starlings. The documents prioritise technical precision and implementation clarity over explanation or justification.
+
 ### [Document 1: Mathematical principles](principles.md)
 Establishes the mathematical foundations, user requirements, and theoretical guarantees. Defines the multi-collection model as F = (R, {H₁, H₂, ..., Hₙ}, I) where collections ARE hierarchies. Proves the efficiency of incremental computation through additive metric properties and introduces the contextual ownership architecture where hierarchies reference their DataContext to ensure complete record coverage including isolates.
 

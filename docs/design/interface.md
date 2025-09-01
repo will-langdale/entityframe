@@ -106,6 +106,9 @@ class EntityFrame:
         Uses the EntityFrame's complete record set to ensure isolated records
         are represented as singleton entities.
         
+        Note: PyO3 automatically converts the Python list to &PyList for optimal
+        batch processing with a single GIL acquisition in Rust.
+        
         Args:
             name: Unique name for this collection
             edges: List of (record_i, record_j, similarity) tuples
@@ -293,7 +296,7 @@ class Collection:
     def from_edges(cls,
                   edges: List[Tuple[Any, Any, float]],
                   records: Optional[Union[List[Key], List[Entity]]] = None,
-                  quantize: int = 6) -> 'Collection':
+                  quantise: int = 6) -> 'Collection':
         """
         Build collection from weighted edges.
         
@@ -305,10 +308,11 @@ class Collection:
             records: Optional specification of complete record space:
                     - List[Key]: Records that should exist (can be all records or just 
                                 additional ones not in edges - Rust deduplicates)
-                    - List[Entity]: Pre-grouped entities for hierarchical resolution
-                                   (converted to edges + records at Python level)
+                    - List[Entity]: Pre-grouped entities for hierarchical resolution.
+                                   All entity-to-edge expansion happens in Rust where
+                                   all pairs within each entity get weight 1.0
                     - None: Only include records mentioned in edges
-            quantize: Decimal places for threshold precision (1-6, default: 6).
+            quantise: Decimal places for threshold precision (1-6, default: 6).
                      Prevents floating-point comparison issues.
             
         Returns:
@@ -334,8 +338,7 @@ class Collection:
             )
             
             # Hierarchical resolution with pre-grouped entities
-            # Entities are converted to edges at Python level before calling Rust
-            # All pairs within each entity become edges with weight 1.0
+            # Entity expansion happens automatically in Rust
             entities = [
                 Entity(id=Key(0), members={("src1", "key1"), ("src1", "key2")}),
                 Entity(id=Key(1), members={("src2", "key3")}),
@@ -358,8 +361,8 @@ class Collection:
         appears in exactly one entity). Isolated records should be included
         as singleton entities.
         
-        Internally, entities are converted to edges (all pairs within each 
-        entity get weight 1.0) before building the hierarchy.
+        Internally, entities are converted to edges in Rust (all pairs within  
+        each entity get weight 1.0) before building the hierarchy.
         
         For probabilistic entity formation, use from_edges instead.
         
@@ -618,7 +621,7 @@ entities = [
 ]
 collection = sl.Collection.from_entities(entities)
 
-# From Entity objects
+# From Entity objects (automatic edge expansion in Rust)
 entities = [
     Entity(id=Key("e1"), members={("CRM", "key1"), ("CRM", "key2")}),
     Entity(id=Key("e2"), members={("MailingList", "key3")})
@@ -674,9 +677,8 @@ schema = pa.schema([
         ("name", pa.dictionary(pa.int8(), pa.string())),
         ("merge_events", pa.list_(pa.struct([
             ("threshold", pa.float64()),
-            ("merging_components", pa.list_(pa.uint32())),
-            ("result_component", pa.uint32()),
-            ("affected_records", pa.list_(pa.uint32()))  # Expanded from RoaringBitmap
+            # RoaringBitmaps are expanded to nested lists for Arrow serialisation
+            ("merging_groups", pa.list_(pa.list_(pa.uint32()))),  # Nested lists for Vec<RoaringBitmap>
         ])))
     ]))),
     
@@ -709,22 +711,20 @@ CREATE TABLE collections (
 CREATE TABLE merge_events (
     merge_id INTEGER PRIMARY KEY,
     collection_id INTEGER REFERENCES collections(collection_id),
-    threshold DOUBLE,
-    result_component INTEGER
+    threshold DOUBLE
 );
 
--- Merge components junction table
-CREATE TABLE merge_components (
-    merge_id INTEGER REFERENCES merge_events(merge_id),
-    component_id INTEGER,
-    PRIMARY KEY (merge_id, component_id)
+-- Merge groups table (each group within a merge event)
+CREATE TABLE merge_groups (
+    group_id INTEGER PRIMARY KEY,
+    merge_id INTEGER REFERENCES merge_events(merge_id)
 );
 
--- Affected records junction table
-CREATE TABLE merge_affected_records (
-    merge_id INTEGER REFERENCES merge_events(merge_id),
+-- Records in each merge group
+CREATE TABLE merge_group_records (
+    group_id INTEGER REFERENCES merge_groups(group_id),
     record_index INTEGER REFERENCES records(record_index),
-    PRIMARY KEY (merge_id, record_index)
+    PRIMARY KEY (group_id, record_index)
 );
 ```
 
@@ -753,6 +753,7 @@ entities_with_ids = [
 cross_source_edges = link_entities(entities_with_ids)
 
 # Build hierarchy over entities
+# When records contains Entity objects, Rust automatically expands them to edges
 final_collection = sl.Collection.from_edges(
     edges=cross_source_edges,
     records=entities_with_ids  # Entities expand to their member records
@@ -1056,7 +1057,7 @@ class StarlingsBenchmark:
     def benchmark_hierarchy_build(self):
         edges = self.generate_edges()
         start = time.time()
-        collection = sl.Collection.from_edges(edges)  # Uses default quantize=6
+        collection = sl.Collection.from_edges(edges)  # Uses default quantise=6
         return time.time() - start
     
     def benchmark_partition_reconstruction(self, collection):

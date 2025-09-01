@@ -67,18 +67,18 @@ impl PartitionLevel {
 ```rust
 // Align to cache lines for better performance
 #[repr(C, align(64))]
-pub struct CacheAlignedPartition {
+pub struct CacheAlignedPartition<'a> {
     threshold: f64,
     num_entities: u32,
     _pad1: [u8; 4],  // Padding for alignment
     
-    // Hot data together
-    entity_sizes: *const u32,
-    entity_data: *const RoaringBitmap,
+    // Hot data together - using safe references with lifetimes
+    entity_sizes: &'a [u32],
+    entity_data: &'a [RoaringBitmap],
     
     // Cold data separately
-    metadata: *const PartitionMetadata,
-    _pad2: [u8; 32],  // Prevent false sharing
+    metadata: Option<&'a PartitionMetadata>,
+    _pad2: [u8; 24],  // Prevent false sharing (adjusted for reference sizes)
 }
 
 // Structure of Arrays for better vectorisation
@@ -213,19 +213,27 @@ impl PyEntityFrame {
     
     pub fn add_collection_from_edges(&mut self, 
                                      name: &str, 
-                                     edges: Vec<(PyObject, PyObject, f64)>) -> PyResult<()> {
+                                     edges: &PyList) -> PyResult<()> {
+        // Optimised batch conversion with single GIL acquisition
+        let internal_edges = Python::with_gil(|py| -> PyResult<Vec<(u32, u32, f64)>> {
+            let frame = self.inner.lock().unwrap();
+            let mut result = Vec::with_capacity(edges.len());
+            
+            for item in edges.iter() {
+                let tuple = item.downcast::<PyTuple>()?;
+                let k1 = tuple.get_item(0)?;
+                let k2 = tuple.get_item(1)?;
+                let weight = tuple.get_item(2)?.extract::<f64>()?;
+                
+                let idx1 = python_key_to_index_obj(k1, &frame.context)?;
+                let idx2 = python_key_to_index_obj(k2, &frame.context)?;
+                result.push((idx1, idx2, weight));
+            }
+            Ok(result)
+        })?;
+        
+        // Process in Rust without GIL
         let mut frame = self.inner.lock().unwrap();
-        
-        // Convert Python Key objects directly to u32 indices for performance
-        // This is the most efficient conversion point
-        let internal_edges: Vec<(u32, u32, f64)> = edges.into_iter()
-            .map(|(k1, k2, w)| {
-                let idx1 = python_key_to_index(k1, &frame.context)?;
-                let idx2 = python_key_to_index(k2, &frame.context)?;
-                Ok((idx1, idx2, w))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        
         frame.add_collection_from_edges(name, internal_edges);
         Ok(())
     }
@@ -299,26 +307,43 @@ impl PyEntityFrame {
 Performance note: Convert Python Keys directly to u32 indices for hierarchy operations. Only use Rust Key enum when preserving actual key values is needed.
 
 ```rust
-fn python_key_to_index(key: PyObject, context: &DataContext) -> PyResult<u32> {
-    Python::with_gil(|py| {
-        // Extract the key value from Python
-        let rust_key = if let Ok(v) = key.extract::<u32>(py) {
-            Key::U32(v)
-        } else if let Ok(v) = key.extract::<u64>(py) {
-            Key::U64(v)
-        } else if let Ok(v) = key.extract::<String>(py) {
-            Key::String(v)
-        } else if let Ok(v) = key.extract::<Vec<u8>>(py) {
-            Key::Bytes(v)
-        } else {
-            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Key must be int, str, or bytes"
-            ));
-        };
-        
-        // Look up or create index in context
-        Ok(context.get_or_create_index(&rust_key) as u32)
-    })
+fn python_key_to_index(key: &PyObject, py: Python, context: &DataContext) -> PyResult<u32> {
+    // Extract the key value from Python
+    let rust_key = if let Ok(v) = key.extract::<u32>(py) {
+        Key::U32(v)
+    } else if let Ok(v) = key.extract::<u64>(py) {
+        Key::U64(v)
+    } else if let Ok(v) = key.extract::<String>(py) {
+        Key::String(v)
+    } else if let Ok(v) = key.extract::<Vec<u8>>(py) {
+        Key::Bytes(v)
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Key must be int, str, or bytes"
+        ));
+    };
+    
+    // Look up or create index in context
+    Ok(context.get_or_create_index(&rust_key) as u32)
+}
+
+// Optimised version for when we already have PyAny
+fn python_key_to_index_obj(key: &PyAny, context: &DataContext) -> PyResult<u32> {
+    let rust_key = if let Ok(v) = key.extract::<u32>() {
+        Key::U32(v)
+    } else if let Ok(v) = key.extract::<u64>() {
+        Key::U64(v)
+    } else if let Ok(v) = key.extract::<String>() {
+        Key::String(v)
+    } else if let Ok(v) = key.extract::<Vec<u8>>() {
+        Key::Bytes(v)
+    } else {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Key must be int, str, or bytes"
+        ));
+    };
+    
+    Ok(context.get_or_create_index(&rust_key) as u32)
 }
 ```
 
@@ -573,13 +598,12 @@ pub fn create_starlings_schema() -> Schema {
             Field::new("merge_events", DataType::List(
                 Box::new(DataType::Struct(vec![
                     Field::new("threshold", DataType::Float64, false),
-                    Field::new("merging_components", DataType::List(
-                        Box::new(DataType::UInt32)
-                    ), false),
-                    Field::new("result_component", DataType::UInt32, false),
-                    Field::new("affected_records", DataType::List(
-                        Box::new(DataType::UInt32)
-                    ), false),
+                    // RoaringBitmaps are expanded to nested lists for Arrow serialisation
+                    Field::new("merging_groups", DataType::List(
+                        Box::new(DataType::List(
+                            Box::new(DataType::UInt32)
+                        ))
+                    ), false),  // Nested lists for Vec<RoaringBitmap>
                 ]))
             ), false),
         ]))), false),

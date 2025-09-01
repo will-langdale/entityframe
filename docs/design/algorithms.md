@@ -38,6 +38,8 @@ pub struct DataContext {
 impl DataContext {
     /// Ensure a record exists in the context (deduplication)
     /// O(1) lookup and optional insertion
+    /// Note: DataContext is append-only. Adding records after a hierarchy is built
+    /// creates isolates (singleton entities) in any hierarchies that reference it.
     pub fn ensure_record(&mut self, source: &str, key: Key) -> RecordIndex {
         let source_id = self.source_interner.get_or_intern(source);
         let identity = (source_id, key.clone());
@@ -138,7 +140,9 @@ impl Collection {
                             context.ensure_record_with_source(*source_id, key.clone());
                         }
                     }
-                    // Entities are then converted to edges for hierarchy building
+                    // Then convert entities to edges for hierarchy building
+                    let entity_edges = Self::entities_to_edges_internal(&entities);
+                    edges.extend(entity_edges);
                 }
             }
         }
@@ -169,9 +173,8 @@ impl Collection {
         
         let context_arc = Arc::new(context);
         
-        // Convert entities to edges at threshold 1.0
-        // All pairs within each entity get weight 1.0
-        let edges = entities_to_edges(&entities, 1.0);
+        // Convert entities to edges at threshold 1.0 in Rust
+        let edges = Self::entities_to_edges_internal(&entities);
         let hierarchy = PartitionHierarchy::from_edges(edges, context_arc.clone(), 6);
         
         Collection {
@@ -179,6 +182,31 @@ impl Collection {
             hierarchy,
             is_view: false,
         }
+    }
+    
+    /// Convert entities to edges for hierarchy building (Rust implementation for performance)
+    /// O(n²) within each entity, but entities are typically small
+    /// All pairs within an entity get weight 1.0
+    fn entities_to_edges_internal(entities: &[Vec<(SourceId, Key)>]) -> Vec<(u32, u32, f64)> {
+        use rayon::prelude::*;
+        
+        entities.par_iter()
+            .flat_map(|entity| {
+                let members: Vec<_> = entity.iter().collect();
+                let mut edges = Vec::with_capacity(members.len() * (members.len() - 1) / 2);
+                
+                for i in 0..members.len() {
+                    for j in i+1..members.len() {
+                        edges.push((
+                            members[i].to_index(),
+                            members[j].to_index(), 
+                            1.0
+                        ));
+                    }
+                }
+                edges
+            })
+            .collect()
     }
     
     /// Create an explicit owned copy of this collection
@@ -242,14 +270,9 @@ impl PartitionHierarchy {
 pub struct MergeEvent {
     threshold: f64,
     
-    // Components merging at this threshold (supports n-way)
-    merging_components: Vec<ComponentId>,
-    
-    // The new component formed
-    result_component: ComponentId,
-    
-    // Records involved for incremental updates
-    affected_records: RoaringBitmap,
+    // Groups merging at this threshold (supports n-way)
+    // Each RoaringBitmap contains the record indices in that group
+    merging_groups: Vec<RoaringBitmap>,
 }
 
 pub struct PartitionLevel {
@@ -277,8 +300,8 @@ pub struct IncrementalMetricState {
 
 For 1M records with 1M edges in the Contextual Ownership model:
 - DataContext: ~10MB for records + interning
-- Merge events: 1M × 50-100 bytes = 50-100MB (includes RoaringBitmaps)
-- LRU cache (10 partitions): 10 × 500KB = 5MB
+- Merge events: 1M × 50-100 bytes = ~50-100MB (includes RoaringBitmaps)
+- LRU cache (10 partitions): 10 × 500KB = ~5MB
 - Total per collection: ~60-115MB
 - Shared context when in frame: No duplication
 - Total for 5 collections in frame: ~300-500MB (not 5× due to sharing)
@@ -324,28 +347,35 @@ impl PartitionHierarchy {
             threshold_groups.push((current_threshold, current_group));
         }
         
-        // Build merge events with proper component tracking
+        // Build merge events directly with RoaringBitmaps
         let mut merges = Vec::new();
         let mut uf = UnionFind::new(num_records);
-        let mut component_map: HashMap<usize, ComponentId> = HashMap::new();
-        let mut next_component_id = 0;
-        
-        // Initialise each record as its own component (handles isolates)
-        for i in 0..num_records {
-            component_map.insert(i, ComponentId(i as u32));
-        }
         
         for (threshold, edges_at_threshold) in threshold_groups {
-            // Track which components are merging
-            let mut merging_groups: HashMap<usize, HashSet<usize>> = HashMap::new();
+            // Track which root components are merging
+            let mut merging_roots: HashMap<usize, RoaringBitmap> = HashMap::new();
             
+            // First pass: identify all merging groups
             for (src, dst) in &edges_at_threshold {
                 let root_src = uf.find(*src as usize);
                 let root_dst = uf.find(*dst as usize);
                 
                 if root_src != root_dst {
-                    merging_groups.entry(root_src).or_default().insert(root_dst);
-                    merging_groups.entry(root_dst).or_default().insert(root_src);
+                    // Collect all records in each component
+                    let mut src_group = RoaringBitmap::new();
+                    let mut dst_group = RoaringBitmap::new();
+                    
+                    for i in 0..num_records {
+                        if uf.find(i) == root_src {
+                            src_group.insert(i as u32);
+                        }
+                        if uf.find(i) == root_dst {
+                            dst_group.insert(i as u32);
+                        }
+                    }
+                    
+                    merging_roots.entry(root_src).or_insert(src_group.clone());
+                    merging_roots.entry(root_dst).or_insert(dst_group.clone());
                 }
             }
             
@@ -354,50 +384,41 @@ impl PartitionHierarchy {
                 uf.union(*src as usize, *dst as usize);
             }
             
-            // Create merge events (handles n-way merges naturally)
+            // Create merge events for connected groups
             let mut processed = HashSet::new();
-            for root in merging_groups.keys() {
+            for root in merging_roots.keys() {
                 if processed.contains(root) {
                     continue;
                 }
                 
-                // Find all components in this connected merge group
+                // Find all groups in this connected merge
+                let mut merge_groups = Vec::new();
                 let mut to_visit = vec![*root];
-                let mut merge_group = Vec::new();
-                let mut affected = RoaringBitmap::new();
                 
                 while let Some(current) = to_visit.pop() {
                     if !processed.insert(current) {
                         continue;
                     }
                     
-                    merge_group.push(component_map[&current]);
-                    
-                    // Add all records in this component to affected set
-                    for i in 0..num_records {
-                        if uf.find(i) == current {
-                            affected.insert(i as u32);
+                    if let Some(group) = merging_roots.get(&current) {
+                        merge_groups.push(group.clone());
+                        
+                        // Find other roots that merge with this one
+                        for (other_root, _) in &merging_roots {
+                            if !processed.contains(other_root) {
+                                // Check if they're now in same component
+                                if uf.find(*other_root) == uf.find(current) {
+                                    to_visit.push(*other_root);
+                                }
+                            }
                         }
-                    }
-                    
-                    if let Some(neighbours) = merging_groups.get(&current) {
-                        to_visit.extend(neighbours.iter().cloned());
                     }
                 }
                 
-                if merge_group.len() > 1 {
-                    let result_id = ComponentId(next_component_id);
-                    next_component_id += 1;
-                    
-                    // Update component map for merged roots
-                    let new_root = uf.find(*root);
-                    component_map.insert(new_root, result_id);
-                    
+                if merge_groups.len() > 1 {
                     merges.push(MergeEvent {
                         threshold,
-                        merging_components: merge_group,
-                        result_component: result_id,
-                        affected_records: affected,
+                        merging_groups: merge_groups,
                     });
                 }
             }
@@ -462,12 +483,19 @@ impl PartitionHierarchy {
         // Apply all merges with threshold >= t
         for merge in &self.merges {
             if merge.threshold >= threshold {
-                // Apply this merge
-                for window in merge.merging_components.windows(2) {
-                    if let [comp_a, comp_b] = window {
-                        // In practice, we'd map components back to records
-                        // This is simplified for clarity
-                        uf.union(comp_a.0 as usize, comp_b.0 as usize);
+                // Union all groups in this merge
+                let all_records: RoaringBitmap = merge.merging_groups
+                    .iter()
+                    .fold(RoaringBitmap::new(), |mut acc, group| {
+                        acc.or_inplace(group);
+                        acc
+                    });
+                
+                // Pick first record as representative
+                let mut iter = all_records.iter();
+                if let Some(first) = iter.next() {
+                    for record in iter {
+                        uf.union(first as usize, record as usize);
                     }
                 }
             } else {
@@ -499,23 +527,6 @@ impl PartitionHierarchy {
 ## Helper functions for hierarchy construction
 
 ```rust
-/// Convert entities to edges for hierarchy building
-/// O(n²) within each entity, but entities are typically small
-/// All pairs within an entity get weight 1.0
-fn entities_to_edges(entities: &[EntitySet], weight: f64) -> Vec<(u32, u32, f64)> {
-    let mut edges = Vec::new();
-    for (entity_id, entity_set) in entities.iter().enumerate() {
-        let members: Vec<_> = entity_set.iter().collect();
-        // Create edges between all pairs in the entity
-        for i in 0..members.len() {
-            for j in i+1..members.len() {
-                edges.push((members[i].to_index(), members[j].to_index(), weight));
-            }
-        }
-    }
-    edges
-}
-
 /// Convert Key-based edges to u32 indices using DataContext
 /// O(m) where m = number of edges
 fn edges_to_indices(edges: &[(Key, Key, f64)], context: &DataContext) -> Vec<(u32, u32, f64)> {
@@ -531,16 +542,18 @@ fn edges_to_indices(edges: &[(Key, Key, f64)], context: &DataContext) -> Vec<(u3
 impl PartitionHierarchy {
     pub fn translate_indices(&mut self, translation_map: &TranslationMap) {
         for merge in &mut self.merges {
-            // Translate affected records
-            let mut translated_records = RoaringBitmap::new();
-            for old_idx in merge.affected_records.iter() {
-                if let Some(&new_idx) = translation_map.get(old_idx) {
-                    translated_records.insert(new_idx as u32);
+            // Translate each merging group
+            let mut translated_groups = Vec::new();
+            for group in &merge.merging_groups {
+                let mut translated_group = RoaringBitmap::new();
+                for old_idx in group.iter() {
+                    if let Some(&new_idx) = translation_map.get(old_idx) {
+                        translated_group.insert(new_idx as u32);
+                    }
                 }
+                translated_groups.push(translated_group);
             }
-            merge.affected_records = translated_records;
-            
-            // Component IDs may also need translation depending on implementation
+            merge.merging_groups = translated_groups;
         }
     }
 }
@@ -712,10 +725,16 @@ impl LazyMetricsCache {
                                 truth: &PartitionLevel) -> f64 {
         // Find nearest computed threshold
         if let Some((prev_t, prev_val)) = self.find_nearest_computed(metric, threshold) {
-            // Incremental update - O(k) where k = affected entities
-            let delta = self.compute_delta(metric, prev_t, threshold, truth);
-            self.computation_stats.incremental_computations += 1;
-            prev_val + delta
+            // Simple heuristic: if too far away, recompute from scratch
+            if (threshold - prev_t).abs() > threshold * 0.1 {
+                self.computation_stats.total_computations += 1;
+                self.compute_from_scratch(metric, threshold, truth)
+            } else {
+                // Incremental update - O(k) where k = affected entities
+                let delta = self.compute_delta(metric, prev_t, threshold, truth);
+                self.computation_stats.incremental_computations += 1;
+                prev_val + delta
+            }
         } else {
             // First computation - O(n²) but only once
             self.computation_stats.total_computations += 1;
@@ -747,11 +766,15 @@ pub struct SparseContingencyTable {
 impl SparseContingencyTable {
     pub fn update_incremental(&mut self, merge: &MergeEvent) {
         // Only update cells affected by merge - O(k)
-        for entity_id in &merge.merging_components {
-            // Update only non-zero cells involving this entity
+        for group in &merge.merging_groups {
+            // Update only non-zero cells involving records in this group
             let affected_cells = self.nonzero_cells
                 .keys()
-                .filter(|(r, c)| *r == *entity_id || *c == *entity_id)
+                .filter(|(r, c)| {
+                    // Check if either entity contains any record from the merging group
+                    self.entity_contains_any(*r, group) || 
+                    self.entity_contains_any(*c, group)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             
