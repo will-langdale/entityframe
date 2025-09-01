@@ -26,21 +26,21 @@
 
 ### Task 1.2: Hierarchy Construction
 
-**Create files**:
-- `rust/starlings-core/src/hierarchy/mod.rs`
-- `rust/starlings-core/src/hierarchy/builder.rs`
-- `rust/starlings-core/src/hierarchy/merge_event.rs`
+**Create files**: ✅ COMPLETED
+- ✅ `src/rust/starlings/src/hierarchy/mod.rs`
+- ✅ `src/rust/starlings/src/hierarchy/builder.rs`
+- ✅ `src/rust/starlings/src/hierarchy/merge_event.rs`
 
-**Implement**:
-- [ ] MergeEvent struct with threshold and RoaringBitmap merging_groups
-- [ ] PartitionHierarchy struct with merges Vec, partition_cache LruCache, context Arc<DataContext>
-- [ ] PartitionHierarchy::from_edges() using union-find (disjoint_sets crate)
-- [ ] Quantisation enforcement (1-6 decimal places)
-- [ ] Fixed-point threshold_to_key() conversion (multiply by 1_000_000)
-- [ ] Tests: 3-node graph, disconnected components, same-threshold edges (n-way merge)
-- [ ] Benchmark: from_edges with 1k and 10k edges
+**Implement**: ✅ COMPLETED
+- ✅ MergeEvent struct with threshold and RoaringBitmap merging_groups
+- ✅ PartitionHierarchy struct with merges Vec, partition_cache LruCache, context Arc<DataContext>
+- ✅ PartitionHierarchy::from_edges() using union-find (disjoint_sets crate)
+- ✅ Quantisation enforcement (1-6 decimal places)
+- ✅ Fixed-point threshold_to_key() conversion (multiply by 1_000_000)
+- ✅ Tests: 3-node graph, disconnected components, same-threshold edges (n-way merge)
+- ✅ Benchmark: from_edges with 1k and 10k edges
 
-**Dependencies**: disjoint-sets, lru  
+**Dependencies**: ✅ COMPLETED - disjoint-sets, lru  
 **Reference**: `algorithms.md` - Connected components algorithm
 
 ### Task 1.3: Partition Reconstruction

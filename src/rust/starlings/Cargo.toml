@@ -20,6 +20,8 @@ rayon = "1.10"
 comfy-table = "7.1"
 string-interner = "0.17"
 fxhash = "0.2"
+disjoint-sets = "0.4"
+lru = "0.12"
 
 [features]
 extension-module = ["pyo3/extension-module"]
@@ -28,7 +30,12 @@ default = ["extension-module"]
 [dev-dependencies]
 pyo3 = { version = "0.23", features = ["auto-initialize"] }
 criterion = "0.5"
+fastrand = "2.0"
 
 [[bench]]
 name = "record_insertion"
+harness = false
+
+[[bench]]
+name = "hierarchy_construction"
 harness = false

@@ -5,6 +5,7 @@ use roaring::RoaringBitmap;
 use std::collections::HashMap;
 use string_interner::{DefaultBackend, DefaultSymbol, StringInterner, Symbol};
 
+#[derive(Debug)]
 pub struct DataContext {
     pub records: Vec<InternedRecord>,
     pub source_interner: StringInterner<DefaultBackend>,
