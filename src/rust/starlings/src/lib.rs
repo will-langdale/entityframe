@@ -1,4 +1,5 @@
 pub mod core;
+pub mod hierarchy;
 
 #[cfg(test)]
 mod tests {

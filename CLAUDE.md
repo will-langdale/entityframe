@@ -50,40 +50,24 @@ src/
 
 This project uses `just` as a command runner and `uv` for Python dependency management:
 
-- `just install`: Install all dependencies (Python + dev tools)
-- `just build`: Build the Rust extension module
-- `just test`: Run quick tests (Python + Rust, excluding slow tests)
-- `just test scale`: Run all tests including scale tests (Python + Rust)
-- `just test python`: Run Python tests only (excluding slow tests)
-- `just test rust`: Run Rust tests only
-- `just bench`: Run Rust benchmarks
+- `just install`: Install development dependencies
+- `just build`: Build the Rust extension
+- `just test`: Module imports
+- `just bench`: Run benchmarks
 - `just format`: Format and lint all code (Python + Rust)
-- `just clean`: Remove all build artifacts
-- `just docs`: Run local documentation development server
+- `just clean`: Clean build artifacts
+- `just docs`: Run a local documentation development server
 
 ## Testing strategy
 
-### Test commands
-- `just test`: Quick tests (Python + Rust, excluding slow tests) - use for development
-- `just test scale`: All tests including scale tests - use before releases  
-- `just test python`: Python tests only (excluding slow tests) - use for Python development
-- `just test rust`: Rust tests only - use for Rust development
+The project currently has basic module import testing via `just test`. Full test suite implementation is planned for future milestones.
 
-### Test categories
+### Benchmarking
 
-**Quick tests** (default):
-- Functional tests that verify correctness
-- Performance regression tests at smaller scales (1k-5k entities)
-- Complete in under 10 seconds
-- Run automatically in CI/development workflow
-
-**Scale tests** (`just test scale`):
-- Million-scale performance validation tests (`test_million_scale_performance`)
-- Large-scale comparison benchmarks (`test_comparison_scaling_performance`)  
-- Take several minutes to complete
-- Run manually to validate production readiness
-
-Use `just test` for regular development to get fast feedback. Use `just test scale` when validating performance at target scale.
+Use `just bench` to run Rust benchmarks for performance validation:
+- Hierarchy construction performance (1k-10k edges)
+- Scaling tests across different dataset sizes
+- Quantisation effect measurement
 
 There is a house style for parameterising Python unit tests:
 
@@ -103,9 +87,9 @@ def test_something(foo: bool, bar: int):
 
 1. Install dependencies: `just install`
 2. Build the project: `just build`
-3. Run quick tests: `just test`
+3. Run tests: `just test`
 4. Check formatting/linting: `just format`
-5. Run scale tests before releases: `just test scale`
+5. Run benchmarks: `just bench`
 
 ## Project structure notes
 
