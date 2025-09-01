@@ -35,3 +35,12 @@ slow:
 # Run only Rust tests
 rust: _rust
     @echo "✅ Ran Rust tests."
+
+# Internal benchmark runner
+_bench:
+    @echo "Building Rust extension for benchmarks..."
+    uv run maturin develop
+    #!/usr/bin/env bash
+    # Set the python interpreter for PYO3
+    export PYO3_PYTHON=$(uv run which python)
+    cargo bench

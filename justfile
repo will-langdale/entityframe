@@ -24,6 +24,10 @@ clean:
     find src/ -name "*.pyc" -delete
     find src/ -name "__pycache__" -delete
 
+# Run benchmarks
+bench:
+    just src/tests/_bench
+
 # Run a local documentation development server
 docs:
     uv run mkdocs serve

@@ -56,6 +56,7 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 - `just test scale`: Run all tests including scale tests (Python + Rust)
 - `just test python`: Run Python tests only (excluding slow tests)
 - `just test rust`: Run Rust tests only
+- `just bench`: Run Rust benchmarks
 - `just format`: Format and lint all code (Python + Rust)
 - `just clean`: Remove all build artifacts
 - `just docs`: Run local documentation development server

@@ -1,22 +1,20 @@
-use pyo3::prelude::*;
+pub mod core;
 
-mod collection;
-mod entity;
-mod frame;
-mod hash;
-mod interner;
+#[cfg(test)]
+mod tests {
+    use super::core::{DataContext, Key};
 
-pub use collection::CollectionCore;
-pub use entity::EntityCore;
-pub use frame::EntityFrame;
-pub use interner::StringInternerCore;
+    #[test]
+    fn test_basic_functionality() {
+        let mut ctx = DataContext::new();
 
-/// A Python module implemented in Rust.
-#[pymodule]
-fn starlings(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<StringInternerCore>()?;
-    m.add_class::<EntityCore>()?;
-    m.add_class::<CollectionCore>()?;
-    m.add_class::<EntityFrame>()?;
-    Ok(())
+        let id1 = ctx.ensure_record("test", Key::String("hello".to_string()));
+        let id2 = ctx.ensure_record("test", Key::String("world".to_string()));
+        let id3 = ctx.ensure_record("test", Key::String("hello".to_string()));
+
+        assert_eq!(id1, 0);
+        assert_eq!(id2, 1);
+        assert_eq!(id1, id3);
+        assert_eq!(ctx.len(), 2);
+    }
 }
