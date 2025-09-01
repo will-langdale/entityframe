@@ -4,28 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-starlings is a hybrid Python/Rust package for comparing entity resolutions from different processes. The project uses PyO3 bindings to combine Python's ease of use with Rust's performance for computationally intensive operations.
+starlings is a hybrid Python/Rust package for systematically exploring and comparing entity resolution results across different thresholds and methods. Instead of forcing threshold decisions at processing time, Starlings preserves the complete resolution space as a hierarchy of merge events, enabling instant threshold exploration, efficient metric computation, and lossless data transport between pipeline stages.
 
-### Core Architecture
+### Core Innovation
 
-starlings implements a three-layer architecture for high-performance entity evaluation:
+Starlings revolutionises entity resolution by storing **merge events** rather than fixed clusters, enabling instant exploration of any threshold without recomputation. This achieves 10-100x performance improvements through O(k) incremental metric updates.
 
-1. **String Interning (Layer 1)**: Global string pool mapping record IDs to compact integers
-2. **Roaring Bitmaps (Layer 2)**: Compressed bitmap sets optimised for set operations
-3. **Entity Hashing (Layer 3)**: Deterministic hashing for fast entity identity and caching
+### Key Technical Architecture
 
-### Key Components
+**Multi-Collection Model**:
+- EntityFrame = (Records, {Hierarchies}, Interning)
+- Collections ARE hierarchies that generate partitions at any threshold
+- Contextual ownership enables memory sharing between collections
 
-- **StringInterner**: Maps string record IDs to integers for memory efficiency
-- **Entity**: Core entity object containing dataset->record_id mappings using roaring bitmaps
-- **EntityCollection**: High-level API for managing and comparing multiple entity resolution methods
+**Performance Characteristics**:
+- Hierarchy construction: O(m log m) where m = edges
+- Threshold query: O(m) first time, O(1) cached
+- Metric updates: O(k) incremental between thresholds
+- Memory: ~60-115MB for 1M edges
 
-### Performance Focus
-
-All core operations are implemented in Rust for maximum performance:
-- Set operations use SIMD-optimised roaring bitmaps
-- String interning reduces memory usage by 10-100x
-- Integer-based operations provide excellent cache locality
+**Implementation Stack**:
+- **Rust core**: Performance-critical operations using RoaringBitmaps, Rayon parallelisation
+- **Python interface**: Polars-inspired expression API via PyO3
+- **Arrow integration**: Efficient serialisation with dictionary encoding
 
 ## Architecture
 
@@ -57,6 +58,7 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 - `just test rust`: Run Rust tests only
 - `just format`: Format and lint all code (Python + Rust)
 - `just clean`: Remove all build artifacts
+- `just docs`: Run local documentation development server
 
 ## Testing strategy
 
@@ -82,7 +84,7 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 
 Use `just test` for regular development to get fast feedback. Use `just test scale` when validating performance at target scale.
 
-There is a house style for parameterising Python unit tests.
+There is a house style for parameterising Python unit tests:
 
 ```python
 @pytest.mark.parametrize(
@@ -108,10 +110,43 @@ def test_something(foo: bool, bar: int):
 
 - All source code is contained within `src/` subdirectories
 - Root directory contains only configuration files and documentation  
-- Symmetrical naming: `src/python/entityframe/` and `src/rust/entityframe/`
+- Symmetrical naming: `src/python/starlings/` and `src/rust/starlings/`
 - Follows UV's proven structure for Rust/Python hybrid projects
-- Rust workspace allows for potential multiple crates (entityframe-core, entityframe-cli, etc.)
+- Rust workspace allows for potential multiple crates
 - Python package structure supports both pure Python and Rust extension modules
+
+## Design Documentation
+
+Comprehensive design documents are available in `docs/design/`:
+
+- **overview.md**: High-level system overview and capabilities
+- **principles.md**: Mathematical foundations and theoretical guarantees
+- **algorithms.md**: Core algorithms and data structures
+- **engine.md**: Rust implementation details
+- **interface.md**: Python API specification
+- **roadmap.md**: Detailed implementation plan with specific tasks
+
+These documents provide the complete technical specification for implementing Starlings from scratch.
+
+## API Design (Target)
+
+The target API follows Polars-inspired expression syntax:
+
+```python
+import starlings as sl
+
+# Create frame and add collections
+ef = sl.from_records("source", df)
+ef.add_collection_from_edges("splink", edges)
+
+# Analyse with expressions
+results = ef.analyse(
+    sl.col("splink").sweep(0.5, 0.95, 0.01),
+    sl.col("truth").at(1.0),
+    metrics=[sl.Metrics.eval.f1]
+)
+# Returns List[Dict]: uniform format for all operations
+```
 
 ## Writing style guide
 
