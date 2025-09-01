@@ -138,6 +138,9 @@ Covers the Rust implementation including parallel processing with Rayon, memory-
 ### [Document 4: Python interface](interface.md)
 Complete API specification with the polars-inspired expression system (sl.col().at(), sl.col().sweep()), integration examples for Splink/er-evaluation/Matchbox, and performance benchmarks. Provides migration guides showing the 10-100x speedup for threshold analysis, practical usage patterns including hierarchical resolution workflows, and demonstrates working with List[Dict] outputs using polars for analysis.
 
+### [Document 5: Roadmap](roadmap.md)
+A living roadmap for engineers and coding agents to implement Starlings from scratch, with explicit file paths, dependencies, and test requirements for each task. Organised into four milestones that each deliver working software, this document provides concrete implementation checkpoints that can be ticked off as work progresses, with continuous integration from the first Python MVP onwards.
+
 ## Why this matters
 
 Entity resolution practitioners currently work with incomplete information, forced to make threshold decisions before understanding their impact. Consider a typical workflow:
