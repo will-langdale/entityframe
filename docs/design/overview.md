@@ -54,9 +54,9 @@ import polars as pl
 
 # Load data and add resolution attempts
 ef = sl.from_records("customers", df)
-ef.add_collection("splink", edges=splink_edges)
-ef.add_collection("dedupe", edges=dedupe_edges)
-ef.add_collection("truth", edges=truth_edges)
+ef.add_collection_from_edges("splink", splink_edges)
+ef.add_collection_from_edges("dedupe", dedupe_edges)
+ef.add_collection_from_entities("truth", truth_entities)
 
 # Analyze with composable expressions
 results = ef.analyse(
@@ -82,7 +82,7 @@ sizes = partition.map(sl.Ops.compute.size)   # Entity sizes
 ## Technical Implementation
 
 ### Memory Architecture: Contextual Ownership
-Collections use contextual ownership—they own their data when standalone, but share efficiently when combined in frames. This provides the simplicity of independent objects with the efficiency of shared storage. When collections are views from a frame and need modification, Copy-on-Write ensures safe mutations without affecting parent frames. This trade-off prioritises memory efficiency in the common read-heavy case while maintaining safety.
+Collections use contextual ownership—they reference their DataContext which contains the complete record space. This ensures isolated records (those not appearing in any edges) are properly included as singleton entities. When collections are views from a frame, they share the context efficiently through Arc reference counting. When standalone, they own their context exclusively. This trade-off prioritises memory efficiency in the common read-heavy case while maintaining safety through immutable views.
 
 ### Performance Characteristics
 - **Construction**: O(m log m) where m = number of edges
@@ -122,14 +122,17 @@ These are marker types that route to optimised Rust implementations, providing b
 
 ## Document Structure
 
-### [Document A: Core Design & Mathematics](foundations.md)
-Establishes the mathematical foundations, user requirements, and theoretical guarantees. Defines the multi-collection model as F = (R, {H₁, H₂, ..., Hₙ}, I) where collections ARE hierarchies. Proves the efficiency of incremental computation through additive metric properties and introduces the contextual ownership architecture with Copy-on-Write for safe mutations.
+### [Document 1: Mathematical Principles](principles.md)
+Establishes the mathematical foundations, user requirements, and theoretical guarantees. Defines the multi-collection model as F = (R, {H₁, H₂, ..., Hₙ}, I) where collections ARE hierarchies. Proves the efficiency of incremental computation through additive metric properties and introduces the contextual ownership architecture where hierarchies reference their DataContext to ensure complete record coverage including isolates.
 
-### [Document B: Technical Implementation](implementation.md)
-Details the Rust implementation, including the contextual ownership architecture with Arc<DataContext> for efficient sharing, parallel processing strategies using Rayon, and Python bindings via PyO3. Shows how marker types route to optimised implementations, how the Python/Rust boundary handles automatic Key type conversion, and the union-find algorithm for natural n-way merge support.
+### [Document 2: Computer Science Constructs](constructs.md)
+Details the algorithms and data structures including the union-find based merge event extraction, efficient partition reconstruction from merge events, and incremental metric computation strategies. Shows how the contextual ownership model enables natural handling of isolated records and describes complexity analysis for all core operations.
 
-### [Document C: Reference Architecture](reference.md)
-Complete API specification with the polars-inspired expression system (sl.col().at(), sl.col().sweep()), integration examples for Splink/er-evaluation/Matchbox, and performance benchmarks. Provides migration guides showing the 10-100x speedup for threshold analysis, practical usage patterns, and demonstrates working with List[Dict] outputs using polars for analysis.
+### [Document 3: Rust Engine](engine.md)
+Covers the Rust implementation including parallel processing with Rayon, memory-efficient data structures using RoaringBitmaps, Python bindings via PyO3, and performance optimizations. Details the Key conversion strategy where Python Keys convert directly to u32 indices at the boundary for maximum performance during hierarchy operations.
+
+### [Document 4: Python Interface](interface.md)
+Complete API specification with the polars-inspired expression system (sl.col().at(), sl.col().sweep()), integration examples for Splink/er-evaluation/Matchbox, and performance benchmarks. Provides migration guides showing the 10-100x speedup for threshold analysis, practical usage patterns including hierarchical resolution workflows, and demonstrates working with List[Dict] outputs using polars for analysis.
 
 ## Why This Matters
 
@@ -146,5 +149,6 @@ Starlings also enables workflows that were previously impractical:
 - **Stability analysis**: Find threshold ranges where small changes don't dramatically alter results  
 - **Progressive refinement**: Start with rough blocking, analyse, refine, without losing previous work
 - **Collaborative threshold selection**: Share complete resolution spaces, let downstream users choose thresholds
+- **Hierarchical resolution**: Resolve within sources first, then link resolved entities across sources
 
 This isn't about revolutionizing the field—it's about providing a better tool for a specific problem. If you need to systematically explore thresholds, compare resolution methods, or preserve resolution information across pipeline stages, Starlings offers a purpose-built solution that traditional dataframe libraries cannot provide.

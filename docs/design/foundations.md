@@ -172,7 +172,7 @@ An EntityFrame `F` is formally defined as: `F = (R, {H₁, H₂, ..., Hₙ}, I)`
 - `Hᵢ` are the hierarchical structures (collections ARE hierarchies)
 - `I` is the interning system for efficient reference storage
 
-Each hierarchy `Hᵢ` represents a complete entity resolution attempt over the record space `R`. Collections can be constructed from three input formats: weighted edges (the most common), pre-resolved entity sets, or previously computed merge events for resuming work.
+Each hierarchy `Hᵢ` represents a complete entity resolution attempt over the record space `R`. Collections can be constructed from two primary input formats: weighted edges (the most common) or pre-resolved entity sets. Merge events are an internal representation not exposed as a construction method.
 
 ### Entity Representation: Sets of Interned References
 
@@ -219,12 +219,18 @@ Each collection's hierarchy `H` consists of partition levels: `H = {(t₁, P₁)
 
 **Threshold-based connected components approach**
 
-Starlings uses threshold-based connected components to build hierarchies from pairwise similarities. This is algorithmically equivalent to single-linkage clustering but more natural for entity resolution. Starlings requires all pairwise relationships to be expressed as similarity scores in [0,1], where higher values indicate stronger matches. Distance metrics must be converted to similarities before ingestion.
+Starlings uses threshold-based connected components to build hierarchies from pairwise similarities. This is algorithmically equivalent to single-linkage clustering but more natural for entity resolution. 
+
+**Important Note on Single-Linkage Behaviour**: The use of single-linkage clustering is a deliberate design choice that aligns with Starlings's core philosophy. While single-linkage can exhibit the "chaining effect" where disparate clusters merge through intermediate links, this is actually a feature, not a bug. Starlings preserves the complete resolution space, including these chaining patterns, allowing users to observe and make informed decisions about where to cut the hierarchy. The goal is not to find the "best" clusters automatically, but to capture the raw connectivity structure so users can explore and choose appropriate thresholds based on their specific requirements.
+
+Starlings requires all pairwise relationships to be expressed as similarity scores in [0,1], where higher values indicate stronger matches. Distance metrics must be converted to similarities before ingestion.
 
 1. Given edges with similarities: `{(record_i, record_j, similarity)}`
 2. At threshold `t`, include all edges where `similarity ≥ t`
 3. Find connected components to form entities
 4. Store merge events that transition between partitions
+
+**Handling isolated records**: The hierarchy maintains a reference to its DataContext, which contains the complete record set. Records not appearing in any edges (isolates) are naturally included as singleton entities because the hierarchy knows about all records in its context. When building standalone collections, the optional `records` parameter ensures isolates are added to the context.
 
 **Complexity analysis**: O(m log m) where m is the number of edges. For practical entity resolution with blocking/LSH preprocessing, m is typically O(n) to O(n log n), not O(n²).
 
@@ -386,14 +392,15 @@ Mutual information between two collections at their respective thresholds.
 To resolve the fundamental conflict between standalone collection encapsulation and efficient frame composition, Starlings employs a Contextual Ownership architecture. This model separates physical data storage from logical structure, leveraging an append-only data context for index stability and performance.
 
 **Core components**:
-- **DataContext**: An append-only arena containing record storage and string interning. Once a record is added, its index is immutable for the context's lifetime.
+- **DataContext**: An append-only arena containing record storage and string interning. Once a record is added, its index is immutable for the context's lifetime. Records can be added after hierarchy creation; they simply become isolates (singletons at all thresholds) that don't participate in any merges.
 - **Collections**: Lightweight logical views that hold an Arc<DataContext> reference and structural metadata (hierarchies) composed of indices valid within that context. Collections exist in two states: standalone (exclusively owning their DataContext) or view (sharing a DataContext with a parent EntityFrame).
+- **PartitionHierarchy**: The merge event structure that references its DataContext to know the complete record space. This reference ensures isolates are properly included as singleton entities during partition reconstruction.
 
 **Memory efficiency through sharing**:
 When collections are combined into an EntityFrame, they share the same DataContext through Arc reference counting. This eliminates duplication while maintaining the ability for collections to exist independently. The append-only nature guarantees index stability, enabling lock-free concurrent reads.
 
-**Copy-on-Write for safe mutations**:
-When a collection that is a view (shares its DataContext with a frame) needs to be modified, it automatically triggers a Copy-on-Write operation. This creates a deep copy with its own DataContext, ensuring mutations don't affect the parent frame. This trade-off prioritises memory efficiency in the common read-heavy case while maintaining safety for mutations. **CoW triggers**: Copy-on-Write occurs when: (1) a view from a frame is modified via methods like `add_edges()`, or (2) explicitly via `copy()`. Standalone collections modify in-place without triggering CoW.
+**Simplified ownership model**:
+Collection views obtained from EntityFrames via `ef["name"]` are immutable - they provide read-only access to the hierarchy. All modifications must go through the EntityFrame's methods (e.g., `ef.add_collection_from_edges()`). To create a mutable standalone collection from a view, use the explicit `copy()` method, which creates a deep copy with its own DataContext. This eliminates the complexity of implicit Copy-on-Write while maintaining safety and clarity.
 
 **Automatic memory management**:
 When collections are removed from a frame, automatic compaction can reclaim unused space when garbage exceeds a threshold. This happens transparently without user intervention, maintaining the simplicity of the user-facing API while ensuring long-term memory efficiency.

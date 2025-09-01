@@ -35,6 +35,39 @@ pub struct DataContext {
     source_index: HashMap<SourceId, RoaringBitmap>,
 }
 
+impl DataContext {
+    /// Ensure a record exists in the context (deduplication)
+    /// O(1) lookup and optional insertion
+    pub fn ensure_record(&mut self, source: &str, key: Key) -> RecordIndex {
+        let source_id = self.source_interner.get_or_intern(source);
+        let identity = (source_id, key.clone());
+        
+        if let Some(&idx) = self.identity_map.get(&identity) {
+            idx
+        } else {
+            let idx = self.records.len() as RecordIndex;
+            self.records.push(InternedRecord {
+                source_id,
+                key: key.clone(),
+                attributes: None,
+            });
+            self.identity_map.insert(identity, idx);
+            self.source_index.entry(source_id).or_default().insert(idx);
+            idx
+        }
+    }
+    
+    /// Deep copy the context for collection copying
+    pub fn deep_copy(&self) -> Self {
+        DataContext {
+            records: self.records.clone(),
+            source_interner: self.source_interner.clone(),
+            identity_map: self.identity_map.clone(),
+            source_index: self.source_index.clone(),
+        }
+    }
+}
+
 pub struct InternedRecord {
     source_id: u16,     // Interned source identifier
     key: Key,           // Key within that source (flexible type)
@@ -48,11 +81,23 @@ pub enum Key {
     String(String),  // Keys don't need interning - they're unique by definition
     Bytes(Vec<u8>),
 }
+
+/// Record specification for standalone collection construction
+pub enum RecordSpec {
+    Keys(Vec<Key>),           // Additional records (isolates)
+    Entities(Vec<EntityData>), // Pre-grouped entities for hierarchical resolution
+}
+
+/// Entity data for hierarchical resolution
+pub struct EntityData {
+    id: u32,  // Temporary ID for edge references
+    members: Vec<(SourceId, Key)>,
+}
 ```
 
 ### Contextual Ownership Architecture
 
-**Separation of data and logic**
+**Separation of data and logic with immutable views**
 
 ```rust
 pub struct Collection {
@@ -63,37 +108,95 @@ pub struct Collection {
     hierarchy: PartitionHierarchy,
     
     // Track if this is a view from a frame
-    parent_frame: Option<Arc<EntityFrame>>,
+    is_view: bool,
 }
 
 impl Collection {
     /// Create standalone collection with owned context
-    pub fn from_edges(edges: Vec<(Key, Key, f64)>) -> Self {
-        let context = Arc::new(DataContext::new());
-        // Populate context with records from edges
-        let hierarchy = build_hierarchy(edges, &context);
+    pub fn from_edges(edges: Vec<(Key, Key, f64)>, 
+                     records: Option<RecordSpec>) -> Self {
+        let mut context = DataContext::new();
+        
+        // Add all records mentioned in edges
+        for (key1, key2, _) in &edges {
+            context.ensure_record("default", key1.clone());
+            context.ensure_record("default", key2.clone());
+        }
+        
+        // Add any additional records (isolates or all records - we dedupe)
+        if let Some(records) = records {
+            match records {
+                RecordSpec::Keys(keys) => {
+                    for key in keys {
+                        context.ensure_record("default", key);  // Deduplicates automatically
+                    }
+                },
+                RecordSpec::Entities(entities) => {
+                    // Add all entity members to context
+                    for entity in &entities {
+                        for (source_id, key) in &entity.members {
+                            context.ensure_record_with_source(*source_id, key.clone());
+                        }
+                    }
+                    // Entities are then converted to edges for hierarchy building
+                }
+            }
+        }
+        
+        let context_arc = Arc::new(context);
+        
+        // Convert edges to u32 indices for hierarchy construction
+        let indexed_edges = edges_to_indices(&edges, &context_arc);
+        let hierarchy = PartitionHierarchy::from_edges(indexed_edges, context_arc.clone(), 6);
         
         Collection {
-            context,
+            context: context_arc,
             hierarchy,
-            parent_frame: None,
+            is_view: false,
         }
     }
     
-    /// Copy-on-Write for mutations
-    pub fn add_edges(&mut self, new_edges: Vec<(Key, Key, f64)>) {
-        // Atomic check for unique ownership
-        if let Some(context) = Arc::get_mut(&mut self.context) {
-            // We own the context, mutate in place
-            context.append_records(/* ... */);
-        } else {
-            // Shared context, trigger CoW to create owned collection
-            let new_context = Arc::new(self.context.deep_copy());
-            self.context = new_context;
-            self.parent_frame = None;  // Now standalone with owned DataContext
-            // Now safe to mutate
-            Arc::get_mut(&mut self.context).unwrap().append_records(/* ... */);
+    /// Create standalone collection from pre-resolved entities
+    pub fn from_entities(entities: Vec<EntitySet>) -> Self {
+        let mut context = DataContext::new();
+        
+        // Add all records from entities to context
+        for entity_set in &entities {
+            for (source, key) in entity_set {
+                context.ensure_record(source, key.clone());
+            }
         }
+        
+        let context_arc = Arc::new(context);
+        
+        // Convert entities to edges at threshold 1.0
+        // All pairs within each entity get weight 1.0
+        let edges = entities_to_edges(&entities, 1.0);
+        let hierarchy = PartitionHierarchy::from_edges(edges, context_arc.clone(), 6);
+        
+        Collection {
+            context: context_arc,
+            hierarchy,
+            is_view: false,
+        }
+    }
+    
+    /// Create an explicit owned copy of this collection
+    pub fn copy(&self) -> Self {
+        let new_context = Arc::new(self.context.deep_copy());
+        let mut new_hierarchy = self.hierarchy.clone();
+        new_hierarchy.context = new_context.clone();  // Update to new context
+        
+        Collection {
+            context: new_context,
+            hierarchy: new_hierarchy,
+            is_view: false,
+        }
+    }
+    
+    /// Check if this is an immutable view from a frame
+    pub fn is_view(&self) -> bool {
+        self.is_view
     }
 }
 ```
@@ -104,6 +207,9 @@ impl Collection {
 
 ```rust
 pub struct PartitionHierarchy {
+    // Reference to the data context that gives meaning to record indices
+    context: Arc<DataContext>,
+    
     // Primary: Merge events sorted by threshold (descending)
     merges: Vec<MergeEvent>,
     
@@ -177,13 +283,66 @@ For 1M records with 1M edges in the Contextual Ownership model:
 - Shared context when in frame: No duplication
 - Total for 5 collections in frame: ~300-500MB (not 5× due to sharing)
 
-### Assimilation Process
+### Helper Functions for Hierarchy Construction
+
+```rust
+/// Convert entities to edges for hierarchy building
+/// O(n²) within each entity, but entities are typically small
+/// All pairs within an entity get weight 1.0
+fn entities_to_edges(entities: &[EntitySet], weight: f64) -> Vec<(u32, u32, f64)> {
+    let mut edges = Vec::new();
+    for (entity_id, entity_set) in entities.iter().enumerate() {
+        let members: Vec<_> = entity_set.iter().collect();
+        // Create edges between all pairs in the entity
+        for i in 0..members.len() {
+            for j in i+1..members.len() {
+                edges.push((members[i].to_index(), members[j].to_index(), weight));
+            }
+        }
+    }
+    edges
+}
+
+/// Convert Key-based edges to u32 indices using DataContext
+/// O(m) where m = number of edges
+fn edges_to_indices(edges: &[(Key, Key, f64)], context: &DataContext) -> Vec<(u32, u32, f64)> {
+    edges.iter().map(|(k1, k2, w)| {
+        let idx1 = context.get_index(k1).expect("Key not in context");
+        let idx2 = context.get_index(k2).expect("Key not in context");
+        (idx1 as u32, idx2 as u32, *w)
+    }).collect()
+}
+
+/// Translate all record indices in hierarchy according to map
+/// O(m) where m = number of merge events
+impl PartitionHierarchy {
+    pub fn translate_indices(&mut self, translation_map: &TranslationMap) {
+        for merge in &mut self.merges {
+            // Translate affected records
+            let mut translated_records = RoaringBitmap::new();
+            for old_idx in merge.affected_records.iter() {
+                if let Some(&new_idx) = translation_map.get(old_idx) {
+                    translated_records.insert(new_idx as u32);
+                }
+            }
+            merge.affected_records = translated_records;
+            
+            // Component IDs may also need translation depending on implementation
+        }
+    }
+}
+```
 
 **Adding collections to frames with O(k + m) complexity**
 
 ```rust
 impl EntityFrame {
     pub fn add_collection(&mut self, name: &str, collection: Collection) {
+        // Collections from frames are immutable views
+        if collection.is_view {
+            panic!("Cannot add a view collection to a frame. Use copy() first.");
+        }
+        
         if Arc::ptr_eq(&collection.context, &self.context) {
             // Same context, just add hierarchy
             self.collections.insert(name.into(), collection.hierarchy);
@@ -219,6 +378,7 @@ impl EntityFrame {
         // Translate hierarchy to use new indices - O(m)
         let mut new_hierarchy = collection.hierarchy.clone();
         new_hierarchy.translate_indices(&translation_map);
+        new_hierarchy.context = self.context.clone();  // Update context reference
         
         AssimilatedCollection {
             hierarchy: new_hierarchy,
@@ -237,7 +397,8 @@ use disjoint_sets::UnionFind;
 
 impl PartitionHierarchy {
     pub fn from_edges(edges: Vec<(u32, u32, f64)>, 
-                     quantize: u32) -> Self {  // No longer Optional
+                     context: Arc<DataContext>,
+                     quantize: u32) -> Self {
         // Validate quantize is 1-6
         assert!(quantize >= 1 && quantize <= 6, "quantize must be between 1 and 6");
         
@@ -249,13 +410,6 @@ impl PartitionHierarchy {
         
         // Sort edges by weight (descending) - O(m log m)
         sorted_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
-        
-        // Determine number of records from edges
-        let num_records = sorted_edges.iter()
-            .flat_map(|(i, j, _)| vec![*i, *j])
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0);
         
         // Group edges by threshold (handles quantization naturally)
         let mut threshold_groups: Vec<(f64, Vec<(u32, u32)>)> = Vec::new();
@@ -277,13 +431,13 @@ impl PartitionHierarchy {
         
         // Build merge events with proper component tracking
         let mut merges = Vec::new();
-        let mut uf = UnionFind::new(num_records as usize);
+        let mut uf = UnionFind::new(num_records);
         let mut component_map: HashMap<usize, ComponentId> = HashMap::new();
         let mut next_component_id = 0;
         
-        // Initialize each record as its own component
+        // Initialize each record as its own component (handles isolates)
         for i in 0..num_records {
-            component_map.insert(i as usize, ComponentId(i));
+            component_map.insert(i, ComponentId(i as u32));
         }
         
         for (threshold, edges_at_threshold) in threshold_groups {
@@ -326,8 +480,8 @@ impl PartitionHierarchy {
                     
                     // Add all records in this component to affected set
                     for i in 0..num_records {
-                        if uf.find(i as usize) == current {
-                            affected.insert(i);
+                        if uf.find(i) == current {
+                            affected.insert(i as u32);
                         }
                     }
                     
@@ -355,6 +509,7 @@ impl PartitionHierarchy {
         }
         
         PartitionHierarchy {
+            context,  // Store reference to context
             merges,
             partition_cache: LruCache::new(10),
             metric_state: None,
@@ -403,8 +558,11 @@ impl PartitionHierarchy {
     }
     
     fn reconstruct_at_threshold(&self, threshold: f64) -> PartitionLevel {
-        // Start with all singletons
-        let mut uf = UnionFind::new(self.num_records());
+        // Get complete record space from context
+        let num_records = self.context.records.len();
+        
+        // Start with all singletons (including isolates)
+        let mut uf = UnionFind::new(num_records);
         
         // Apply all merges with threshold >= t
         for merge in &self.merges {
@@ -414,7 +572,7 @@ impl PartitionHierarchy {
                     if let [comp_a, comp_b] = window {
                         // In practice, we'd map components back to records
                         // This is simplified for clarity
-                        uf.union(comp_a.0, comp_b.0);
+                        uf.union(comp_a.0 as usize, comp_b.0 as usize);
                     }
                 }
             } else {
@@ -425,7 +583,7 @@ impl PartitionHierarchy {
         
         // Convert union-find to partition
         let mut entities: HashMap<usize, RoaringBitmap> = HashMap::new();
-        for record in 0..self.num_records() {
+        for record in 0..num_records {
             let root = uf.find(record);
             entities.entry(root).or_default().insert(record as u32);
         }
@@ -715,10 +873,32 @@ pub struct SoAMetrics {
 use rayon::prelude::*;
 
 impl PartitionHierarchy {
-    pub fn build_parallel(edges: Vec<WeightedEdge>) -> Self {
+    pub fn build_parallel(edges: Vec<WeightedEdge>, context: Arc<DataContext>) -> Self {
         // Sort edges in parallel
         let mut edges = edges;
         edges.par_sort_unstable_by(|a, b| b.weight.partial_cmp(&a.weight).unwrap());
+        
+        // Group by threshold
+        let threshold_groups = Self::group_by_threshold(edges);
+        
+        // Process each threshold's merges in parallel where possible
+        let merges: Vec<MergeEvent> = threshold_groups
+            .into_iter()
+            .flat_map(|(threshold, edges)| {
+                Self::find_merges_at_threshold(threshold, edges)
+            })
+            .collect();
+        
+        PartitionHierarchy {
+            context,
+            merges,
+            partition_cache: LruCache::new(10),
+            metric_state: None,
+            threshold_index: Self::build_threshold_index(&merges),
+            cache_size: 10,
+        }
+    }
+}
         
         // Group by threshold
         let threshold_groups = Self::group_by_threshold(edges);
@@ -736,6 +916,7 @@ impl PartitionHierarchy {
             partition_cache: LruCache::new(10),
             metric_state: None,
             threshold_index: Self::build_threshold_index(&merges),
+            num_records,
             cache_size: 10,
         }
     }
@@ -945,9 +1126,38 @@ impl EntityFrame {
         }
     }
     
+    pub fn add_collection_from_edges(&mut self, 
+                                     name: &str, 
+                                     edges: Vec<(u32, u32, f64)>) -> CollectionId {
+        let id = CollectionId::new(name);
+        // Pass the frame's context to the hierarchy
+        let hierarchy = PartitionHierarchy::from_edges(edges, self.context.clone(), 6);
+        self.collections.insert(id, hierarchy);
+        id
+    }
+    
+    pub fn add_collection_from_entities(&mut self,
+                                        name: &str,
+                                        entities: EntitySpec) -> CollectionId {
+        let id = CollectionId::new(name);
+        let edges = match entities {
+            EntitySpec::Sets(sets) => sets_to_edges(sets, 1.0),
+            EntitySpec::Entities(entities) => entities_to_edges(entities, 1.0),
+        };
+        // Pass the frame's context to the hierarchy
+        let hierarchy = PartitionHierarchy::from_edges(edges, self.context.clone(), 6);
+        self.collections.insert(id, hierarchy);
+        id
+    }
+    
     pub fn add_collection(&mut self, 
                          name: &str, 
                          collection: Collection) -> CollectionId {
+        // Only accept owned collections, not views
+        if collection.is_view {
+            panic!("Cannot add a view collection. Use copy() first.");
+        }
+        
         let id = CollectionId::new(name);
         
         // Assimilate if necessary
@@ -962,11 +1172,15 @@ impl EntityFrame {
     }
     
     pub fn get_collection(&self, name: &str) -> Collection {
-        // Return view that shares context
+        // Return immutable view that shares context
+        let hierarchy = self.collections[&CollectionId::from(name)].clone();
+        
+        // The hierarchy already has a reference to the frame's context
+        // Create a view collection that shares this context
         Collection {
-            context: self.context.clone(),
-            hierarchy: self.collections[&CollectionId::from(name)].clone(),
-            parent_frame: Some(Arc::new(self.clone())),
+            context: self.context.clone(),  // Share the frame's context
+            hierarchy,
+            is_view: true,  // Mark as immutable view
         }
     }
     
@@ -1017,22 +1231,46 @@ impl PyEntityFrame {
         })
     }
     
-    pub fn from_edges(&mut self, 
-                         name: &str, 
-                         edges: Option<Vec<(PyObject, PyObject, f64)>>,
-                         collection: Option<PyCollection>) -> PyResult<()> {
+    pub fn add_collection_from_edges(&mut self, 
+                                     name: &str, 
+                                     edges: Vec<(PyObject, PyObject, f64)>) -> PyResult<()> {
         let mut frame = self.inner.lock().unwrap();
         
-        if let Some(edges) = edges {
-            // Build collection from edges
-            // Python objects (int/str/bytes) are converted to Key enum at this boundary
-            let collection = Collection::from_edges(edges);
-            frame.add_collection(name, collection);
-        } else if let Some(collection) = collection {
-            // Add existing collection
-            frame.add_collection(name, collection.inner);
-        }
+        // Convert Python Key objects directly to u32 indices for performance
+        // This is the most efficient conversion point
+        let internal_edges: Vec<(u32, u32, f64)> = edges.into_iter()
+            .map(|(k1, k2, w)| {
+                let idx1 = python_key_to_index(k1, &frame.context)?;
+                let idx2 = python_key_to_index(k2, &frame.context)?;
+                Ok((idx1, idx2, w))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
         
+        frame.add_collection_from_edges(name, internal_edges);
+        Ok(())
+    }
+    
+    pub fn add_collection_from_entities(&mut self,
+                                        name: &str,
+                                        entities: &PyAny) -> PyResult<()> {
+        let mut frame = self.inner.lock().unwrap();
+        
+        // Detect type and convert
+        let entity_spec = if is_entity_list(entities)? {
+            EntitySpec::Entities(extract_entities(entities)?)
+        } else {
+            EntitySpec::Sets(extract_sets(entities)?)
+        };
+        
+        frame.add_collection_from_entities(name, entity_spec);
+        Ok(())
+    }
+    
+    pub fn add_collection(&mut self,
+                         name: &str,
+                         collection: PyCollection) -> PyResult<()> {
+        let mut frame = self.inner.lock().unwrap();
+        frame.add_collection(name, collection.inner);
         Ok(())
     }
     
@@ -1050,32 +1288,24 @@ impl PyEntityFrame {
         // Parse expressions to determine operation type
         let operation = parse_expressions(expressions)?;
         
-        // Use default metrics if none provided
-        // Defaults: eval metrics for comparisons, stats metrics for single collections
+        // Python wrapper provides defaults if metrics not specified
         let metrics = metrics.unwrap_or_else(|| {
             match &operation {
                 Operation::SingleCollection(_) => vec![
-                    MetricsStats::entropy(), 
-                    MetricsStats::entity_count()
+                    PyMetric::EntityCount,
+                    PyMetric::Entropy,
                 ],
                 Operation::Comparison(_) => vec![
-                    MetricsEval::f1(),
-                    MetricsEval::precision(),
-                    MetricsEval::recall(),
-                    MetricsEval::ari(),
-                    MetricsEval::nmi()
-                ],
-                Operation::Sweep(_) => vec![
-                    MetricsEval::f1(),
-                    MetricsEval::precision(),
-                    MetricsEval::recall(),
-                    MetricsEval::ari(),
-                    MetricsEval::nmi()
+                    PyMetric::F1,
+                    PyMetric::Precision,
+                    PyMetric::Recall,
+                    PyMetric::ARI,
+                    PyMetric::NMI,
                 ],
             }
         });
         
-        // Always return List[Dict[str, float]]
+        // Call Rust implementation with required metrics
         let results = match operation {
             Operation::PointComparison(cuts) => {
                 let metrics = frame.compare_cuts(cuts, metrics);
@@ -1100,7 +1330,7 @@ impl PyEntityFrame {
     // American spelling alias
     pub fn analyze(&mut self, 
                   expressions: Vec<PyExpression>,
-                  metrics: Option<Vec<PyMetric>>) -> PyResult<PyObject> {
+                  metrics: Vec<PyMetric>) -> PyResult<PyObject> {
         self.analyse(expressions, metrics)
     }
     
@@ -1122,7 +1352,8 @@ pub struct PyCollection {
 impl PyCollection {
     #[staticmethod]
     pub fn from_edges(edges: Vec<(PyObject, PyObject, f64)>, 
-                     quantize: u32) -> PyResult<Self> {  // Python int → Rust u32
+                     records: Option<&PyAny>,
+                     quantize: u32) -> PyResult<Self> {
         // Validate quantize
         if quantize < 1 || quantize > 6 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -1130,25 +1361,40 @@ impl PyCollection {
             ));
         }
         
-        // Convert Python objects to Rust Key types
-        let collection = Collection::from_edges(convert_edges(edges)?, quantize);
-        Ok(PyCollection { inner: collection })
-    }
-    
-    #[staticmethod]
-    pub fn from_entities(entities: Vec<HashSet<PyObject>>, 
-                        threshold: f64) -> PyResult<Self> {
-        let collection = Collection::from_entities(convert_entities(entities)?, threshold);
-        Ok(PyCollection { inner: collection })
-    }
-    
-    #[staticmethod]
-    pub fn from_merge_events(merges: Vec<PyDict>, 
-                            num_records: usize) -> PyResult<Self> {
-        let collection = Collection::from_merge_events(
-            convert_merges(merges)?, 
-            num_records
+        // Convert Python Key objects to u32 for Rust processing
+        let rust_edges: Vec<(u32, u32, f64)> = edges.into_iter()
+            .map(|(k1, k2, w)| {
+                let id1 = key_to_u32(k1)?;
+                let id2 = key_to_u32(k2)?;
+                Ok((id1, id2, w))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        
+        // Handle optional records parameter (can be all records or just additional)
+        let record_spec = if let Some(records) = records {
+            Some(parse_record_spec(records)?)
+        } else {
+            None
+        };
+        
+        // Build collection with Rust deduplicating between edges and records
+        let collection = Collection::from_edges(
+            rust_edges, 
+            record_spec,
+            quantize
         );
+        Ok(PyCollection { inner: collection })
+    }
+    
+    #[staticmethod]
+    pub fn from_entities(entities: &PyAny) -> PyResult<Self> {
+        let entity_spec = if is_entity_list(entities)? {
+            extract_entities(entities)?
+        } else {
+            extract_sets(entities)?
+        };
+        
+        let collection = Collection::from_entities(entity_spec);
         Ok(PyCollection { inner: collection })
     }
     
@@ -1158,10 +1404,13 @@ impl PyCollection {
     }
     
     pub fn copy(&self) -> PyResult<Self> {
-        let mut new_collection = self.inner.clone();
-        // Trigger CoW to detach and create owned collection with its own DataContext
-        new_collection.make_standalone();
+        let new_collection = self.inner.copy();
         Ok(PyCollection { inner: new_collection })
+    }
+    
+    #[getter]
+    pub fn is_view(&self) -> PyResult<bool> {
+        Ok(self.inner.is_view())
     }
 }
 
@@ -1210,9 +1459,22 @@ impl PyKey {
     }
 }
 
+// Python Entity type (not mirrored in Rust)
+#[pyclass]
+pub struct PyEntity {
+    members: HashSet<(String, PyKey)>,
+}
+
+#[pymethods]
+impl PyEntity {
+    #[new]
+    pub fn new(members: HashSet<(String, PyKey)>) -> Self {
+        PyEntity { members }
+    }
+}
+
 // Injectable operations pattern implementation
 // These are marker types that route to optimised Rust implementations
-// Recognised by match statements in compute_metrics() and execute_operation()
 #[pyclass]
 pub struct F1Metric;
 
@@ -1358,14 +1620,38 @@ impl Ops {
     fn compute() -> OpsCompute { OpsCompute }
 }
 
-// Module definition
+// Key conversion at Python/Rust boundary
+// Performance note: Convert Python Keys directly to u32 indices for hierarchy operations
+// Only use Rust Key enum when preserving actual key values is needed
+fn python_key_to_index(key: PyObject, context: &DataContext) -> PyResult<u32> {
+    Python::with_gil(|py| {
+        // Extract the key value from Python
+        let rust_key = if let Ok(v) = key.extract::<u32>(py) {
+            Key::U32(v)
+        } else if let Ok(v) = key.extract::<u64>(py) {
+            Key::U64(v)
+        } else if let Ok(v) = key.extract::<String>(py) {
+            Key::String(v)
+        } else if let Ok(v) = key.extract::<Vec<u8>>(py) {
+            Key::Bytes(v)
+        } else {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Key must be int, str, or bytes"
+            ));
+        };
+        
+        // Look up or create index in context
+        Ok(context.get_or_create_index(&rust_key) as u32)
+    })
+}
 #[pymodule]
 fn starlings(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<PyEntityFrame>()?;
     m.add_class::<PyCollection>()?;
     m.add_class::<PyPartition>()?;
     m.add_class::<PyColExpression>()?;
-    m.add_class::<PyKey>()?;  // Python Key type
+    m.add_class::<PyKey>()?;
+    m.add_class::<PyEntity>()?;  // Python-only type
     
     // Add nested metrics and ops classes
     m.add_class::<Metrics>()?;
@@ -1430,8 +1716,10 @@ impl BatchProcessor {
         let chunks = edges.chunks(self.batch_size);
         
         for chunk in chunks {
+            // Pass the frame's context to hierarchy
             let hierarchy = PartitionHierarchy::from_edges(
                 chunk.collect(), 
+                self.frame.context.clone(),
                 6  // Default quantization
             );
             // Process hierarchy...

@@ -33,14 +33,17 @@ class Entity:
     A resolved entity containing records from one or more sources.
     
     Note: Entity objects are created by Starlings when you access partition.entities.
-    You don't construct them directly - they're an export format for viewing resolved entities.
+    You can also construct them for hierarchical resolution workflows.
+    Entity is a Python-level type with no Rust counterpart.
     
     Properties:
+        id: Optional[Key] - ID for referencing in edges (required for hierarchical resolution)
         members: Set[Tuple[str, Key]] - Set of (source, key) pairs
         size: int - Number of records in this entity
         sources: Set[str] - Unique sources contributing to this entity
     
     Example:
+        # For viewing resolved entities
         entity.members = {
             ("CRM", Key(123)),
             ("CRM", Key(456)),
@@ -48,6 +51,12 @@ class Entity:
         }
         entity.size = 3
         entity.sources = {"CRM", "MailingList"}
+        
+        # For hierarchical resolution
+        entity = Entity(
+            id=Key(0),  # To reference in edges
+            members={("src1", Key("key1")), ("src1", Key("key2"))}
+        )
     """
 ```
 
@@ -82,45 +91,81 @@ class EntityFrame:
             ef = sl.from_records("CRM", df_customers, key_column="customer_id")
         """
     
-    def add_collection(self,
-                      name: str,
-                      edges: Optional[List[Tuple[int, int, float]]] = None,
-                      collection: Optional['Collection'] = None) -> None:
+    def add_collection_from_edges(self,
+                                 name: str,
+                                 edges: List[Tuple[int, int, float]]) -> None:
         """
-        Add an entity resolution collection to the frame.
+        Add entity resolution collection from weighted edges.
         
-        Collections are hierarchies built from edges or can be added directly.
-        Fixed clusterings should be provided as edges with weight 1.0.
+        Uses the EntityFrame's complete record set to ensure isolated records
+        are represented as singleton entities.
         
         Args:
             name: Unique name for this collection
             edges: List of (record_i, record_j, similarity) tuples
-            collection: Existing Collection object
-            
-        Note:
-            Internally creates a hierarchy from the provided data.
             
         Example:
-            # From probabilistic model
-            ef.add_collection("splink_v1", edges=splink_edges)
+            ef.add_collection_from_edges("splink_v1", splink_edges)
+        """
+    
+    def add_collection_from_entities(self,
+                                    name: str,
+                                    entities: Union[List[Entity], List[Set[Key]]]) -> None:
+        """
+        Add collection from pre-resolved entities at threshold 1.0.
+        
+        For probabilistic entity formation, use add_collection_from_edges instead.
+        
+        Args:
+            name: Unique name for this collection
+            entities: Either Entity objects or sets of keys representing resolved groups
             
-            # From existing collection
-            ef.add_collection("dedupe_v2", collection=dedupe_collection)
+        Example:
+            # From sets of keys
+            entities = [
+                {"cust_123", "cust_456"},
+                {"user_xyz", "user_abc"}
+            ]
+            ef.add_collection_from_entities("ground_truth", entities)
             
-            # From fixed clustering (use weight 1.0)
-            fixed_edges = [(i, j, 1.0) for cluster in clusters for i, j in pairs(cluster)]
-            ef.add_collection("ground_truth", edges=fixed_edges)
+            # From Entity objects (e.g., from another collection)
+            entities = other_partition.entities
+            ef.add_collection_from_entities("imported", entities)
+        """
+    
+    def add_collection(self, name: str, collection: 'Collection') -> None:
+        """
+        Add an existing Collection object to the frame.
+        
+        The collection must be standalone (not a view from another frame).
+        If needed, use collection.copy() first.
+        
+        Args:
+            name: Unique name for this collection
+            collection: Existing Collection object
+            
+        Example:
+            standalone = other_ef["results"].copy()
+            ef.add_collection("imported", standalone)
         """
     
     def __getitem__(self, name: str) -> 'Collection':
         """
         Get collection by name for direct operations.
         
-        Returns a view of the collection that shares the frame's DataContext.
+        Returns an immutable view of the collection that shares the frame's DataContext.
+        Views cannot be modified directly - use EntityFrame methods for modifications.
         
         Example:
             partition = ef["splink"].at(0.85)
             sweep_df = ef["splink"].sweep(0.5, 0.95)
+            
+            # Views are immutable
+            view = ef["splink"]
+            # view.add_edges(...)  # Would raise an error
+            
+            # Create mutable copy if needed
+            owned = ef["splink"].copy()
         """
     
     def analyse(self, *expressions, metrics: Optional[List] = None) -> List[Dict[str, float]]:
@@ -132,7 +177,10 @@ class EntityFrame:
         
         Args:
             *expressions: One or more sl.col() expressions
-            metrics: List of metrics to compute (defaults based on operation type)
+            metrics: List of metrics to compute. If None, defaults are:
+                    - For comparisons (2+ collections): f1, precision, recall, ari, nmi
+                    - For single collection: entity_count, entropy
+                    The Rust layer always receives explicit metrics (Python provides defaults).
         
         Returns:
             List[Dict[str, float]]: Uniform format regardless of operation:
@@ -148,23 +196,28 @@ class EntityFrame:
             # Point comparison
             >>> result = ef.analyse(
             ...     sl.col("splink").at(0.85),
-            ...     sl.col("truth").at(1.0)
+            ...     sl.col("truth").at(1.0),
+            ...     metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision]
             ... )
             [{"splink_threshold": 0.85, "truth_threshold": 1.0, "f1": 0.92, ...}]
             
             # Single collection sweep (note: still uses collection_threshold)
-            >>> result = ef.analyse(sl.col("splink").sweep(0.7, 0.9, 0.1))
-            [{"splink_threshold": 0.7, "entity_count": 1250, "entropy": 7.2},
-             {"splink_threshold": 0.8, "entity_count": 980, "entropy": 6.8},
-             {"splink_threshold": 0.9, "entity_count": 750, "entropy": 6.1}]
+            >>> result = ef.analyse(
+            ...     sl.col("splink").sweep(0.7, 0.9, 0.1),
+            ...     metrics=[sl.Metrics.stats.entity_count]
+            ... )
+            [{"splink_threshold": 0.7, "entity_count": 1250},
+             {"splink_threshold": 0.8, "entity_count": 980},
+             {"splink_threshold": 0.9, "entity_count": 750}]
             
             # Mixed operations (cartesian product)
             >>> result = ef.analyse(
             ...     sl.col("splink").sweep(0.8, 0.9, 0.1),
-            ...     sl.col("dedupe").at(0.75)
+            ...     sl.col("dedupe").at(0.75),
+            ...     metrics=[sl.Metrics.eval.f1]
             ... )
-            [{"splink_threshold": 0.8, "dedupe_threshold": 0.75, "f1": 0.82, ...},
-             {"splink_threshold": 0.9, "dedupe_threshold": 0.75, "f1": 0.87, ...}]
+            [{"splink_threshold": 0.8, "dedupe_threshold": 0.75, "f1": 0.82},
+             {"splink_threshold": 0.9, "dedupe_threshold": 0.75, "f1": 0.87}]
             
             # Easy DataFrame conversion
             >>> import polars as pl
@@ -220,19 +273,20 @@ class Collection:
     
     Collections exist in two states:
     - Standalone: Owns its DataContext exclusively (created via from_* methods)
-    - View: Shares DataContext with parent EntityFrame (created via ef["name"])
+    - View: Immutable view sharing DataContext with parent EntityFrame (created via ef["name"])
     
-    When a view is modified or copied, it automatically becomes standalone
-    through Copy-on-Write, creating its own DataContext.
+    Views cannot be modified. To create a mutable standalone collection from a view,
+    use the explicit copy() method.
     """
     
     @property
     def is_view(self) -> bool:
-        """Whether this collection is a view sharing data with a frame."""
+        """Whether this collection is an immutable view from a frame."""
     
     @classmethod
     def from_edges(cls,
                   edges: List[Tuple[Any, Any, float]],
+                  records: Optional[Union[List[Key], List[Entity]]] = None,
                   quantize: int = 6) -> 'Collection':
         """
         Build collection from weighted edges.
@@ -240,7 +294,14 @@ class Collection:
         Args:
             edges: List of (record_i, record_j, similarity) tuples
                   Records can be any hashable type (int, str, bytes)
-                  Raw values are automatically wrapped in Key objects
+                  At the Python/Rust boundary, these are converted to u32 indices
+                  for efficient hierarchy construction
+            records: Optional specification of complete record space:
+                    - List[Key]: Records that should exist (can be all records or just 
+                                additional ones not in edges - Rust deduplicates)
+                    - List[Entity]: Pre-grouped entities for hierarchical resolution
+                                   (converted to edges + records at Python level)
+                    - None: Only include records mentioned in edges
             quantize: Decimal places for threshold precision (1-6, default: 6).
                      Prevents floating-point comparison issues.
             
@@ -252,60 +313,67 @@ class Collection:
             Python keys (int/str/bytes) are converted to internal Key enum at the Python/Rust boundary.
             
         Example:
+            # Basic usage
             edges = [
                 ("cust_123", "cust_456", 0.95),
                 (123, 456, 0.85),
                 (b"hash1", b"hash2", 0.75)
             ]
-            collection = sl.Collection.from_edges(edges, quantize=4)
+            collection = sl.Collection.from_edges(edges)
+            
+            # With isolated records
+            collection = sl.Collection.from_edges(
+                edges=[(0, 1, 0.9), (2, 3, 0.8)],
+                records=[0, 1, 2, 3, 4]  # Record 4 is an isolate
+            )
+            
+            # Hierarchical resolution with pre-grouped entities
+            # Entities are converted to edges at Python level before calling Rust
+            # All pairs within each entity become edges with weight 1.0
+            entities = [
+                Entity(id=Key(0), members={("src1", "key1"), ("src1", "key2")}),
+                Entity(id=Key(1), members={("src2", "key3")}),
+            ]
+            collection = sl.Collection.from_edges(
+                edges=[(0, 1, 0.9)],  # Links entity 0 to entity 1
+                records=entities
+            )
         """
     
     @classmethod
     def from_entities(cls,
-                     entities: List[Set[Any]],
+                     entities: Union[List[Entity], List[Set[Key]]],
                      threshold: float = 1.0) -> 'Collection':
         """
         Build collection from pre-resolved entities.
         
-        Converts fixed entities to a hierarchy at specified threshold.
+        Creates a hierarchy where these entities exist at threshold 1.0.
+        The entity list should represent a complete partition (every record 
+        appears in exactly one entity). Isolated records should be included
+        as singleton entities.
+        
+        Internally, entities are converted to edges (all pairs within each 
+        entity get weight 1.0) before building the hierarchy.
+        
+        For probabilistic entity formation, use from_edges instead.
         
         Args:
-            entities: List of entity sets
-            threshold: Threshold at which these entities exist
+            entities: Either Entity objects or sets of keys
+            threshold: Always 1.0 (deterministic entities)
             
         Returns:
             New Collection
             
         Example:
+            # From sets of keys
             entities = [
                 {"cust_123", "cust_456"},
                 {"user_xyz", "user_abc"}
             ]
             collection = sl.Collection.from_entities(entities)
-        """
-    
-    @classmethod
-    def from_merge_events(cls,
-                         merges: List[Dict],
-                         num_records: int) -> 'Collection':
-        """
-        Build collection from merge events directly.
-        
-        For resuming work or loading from database.
-        
-        Args:
-            merges: List of merge event dictionaries
-            num_records: Total number of records
             
-        Returns:
-            New Collection
-            
-        Example:
-            merges = [
-                {"threshold": 0.9, "merging": [0, 1], "result": 2},
-                {"threshold": 0.8, "merging": [2, 3], "result": 4}
-            ]
-            collection = sl.Collection.from_merge_events(merges, 100)
+            # From Entity objects
+            collection = sl.Collection.from_entities(partition.entities)
         """
     
     def at(self, threshold: float) -> 'Partition':
@@ -345,17 +413,16 @@ class Collection:
         """
         Create an owned copy of this collection.
         
-        If collection is a view from an EntityFrame, triggers Copy-on-Write
-        to create a deep copy with its own DataContext. This enables safe
-        mutation without affecting the parent frame, at the cost of duplicating
-        the underlying data.
+        If collection is a view from an EntityFrame, creates a deep copy
+        with its own DataContext. This enables safe mutation without
+        affecting the parent frame.
         
         Returns:
             New Collection with independent data
             
         Example:
-            view = ef["splink"]  # Lightweight view
-            owned = view.copy()  # Deep copy with own data
+            view = ef["splink"]  # Immutable view
+            owned = view.copy()  # Mutable standalone collection
         """
 ```
 
@@ -530,7 +597,14 @@ edges = [
 ]
 collection = sl.Collection.from_edges(edges)
 
-# From fixed entities
+# From edges with isolated records
+edges = [(0, 1, 0.9), (2, 3, 0.8)]
+collection = sl.Collection.from_edges(
+    edges=edges,
+    records=[0, 1, 2, 3, 4]  # Record 4 is an isolate
+)
+
+# From fixed entities (sets of keys)
 entities = [
     {0, 1, 4},  # First entity contains records 0, 1, 4
     {2, 3},     # Second entity contains records 2, 3
@@ -538,13 +612,39 @@ entities = [
 ]
 collection = sl.Collection.from_entities(entities)
 
-# From merge events (for persistence/resuming)
-merges = [
-    {"threshold": 0.9, "merging": [0, 1], "result": 2},
-    {"threshold": 0.8, "merging": [2, 3], "result": 4}
+# From Entity objects
+entities = [
+    Entity(id=Key("e1"), members={("CRM", "key1"), ("CRM", "key2")}),
+    Entity(id=Key("e2"), members={("MailingList", "key3")})
 ]
-collection = sl.Collection.from_merge_events(merges, num_records=10)
+collection = sl.Collection.from_entities(entities)
 ```
+
+### Performance Characteristics
+
+Clear distinction between different operation types:
+
+| Operation | First Time | Cached | Notes |
+|-----------|------------|---------|-------|
+| **Hierarchy build** | O(m log m) | - | One-time construction from edges |
+| **Partition at threshold** | O(m) | O(1) | LRU cache holds 10 partitions |
+| **Metric update** | O(k) | - | k = affected entities between thresholds |
+| **Memory usage** | ~60-115MB per 1M edges | - | Varies with merge complexity |
+
+Where:
+- m = number of edges
+- k = number of entities affected by threshold change
+- Cache size is fixed at 10 partitions per hierarchy in v1
+
+### Key Conversion Strategy
+
+For optimal performance, Keys undergo conversion at different points:
+- **Python level**: `Key` objects can hold int, str, or bytes
+- **Python/Rust boundary**: Keys convert directly to u32 indices for hierarchy operations
+- **Rust level**: Work with primitive u32 indices for speed
+- **Storage**: Only the DataContext maintains the actual Key values
+
+This strategy minimizes overhead during computation-intensive hierarchy operations while preserving the flexibility of the Python API.
 
 ## Arrow Schema
 
@@ -622,7 +722,38 @@ CREATE TABLE merge_affected_records (
 );
 ```
 
-## Integration Examples
+## Hierarchical Resolution Workflow
+
+When working with pre-grouped entities (e.g., from previous resolution stages), Starlings supports hierarchical resolution:
+
+```python
+# Stage 1: Resolve within sources
+crm_edges = dedupe_crm_records()
+crm_collection = sl.Collection.from_edges(crm_edges)
+crm_entities = crm_collection.at(0.9).entities
+
+mail_edges = dedupe_mail_records()
+mail_collection = sl.Collection.from_edges(mail_edges)
+mail_entities = mail_collection.at(0.85).entities
+
+# Stage 2: Resolve across sources using entities
+# Entities need IDs for edge references
+entities_with_ids = [
+    Entity(id=Key(i), members=e.members) 
+    for i, e in enumerate(crm_entities + mail_entities)
+]
+
+# Create edges between entities (not individual records)
+cross_source_edges = link_entities(entities_with_ids)
+
+# Build hierarchy over entities
+final_collection = sl.Collection.from_edges(
+    edges=cross_source_edges,
+    records=entities_with_ids  # Entities expand to their member records
+)
+```
+
+This workflow enables multi-stage resolution where early stages handle within-source deduplication and later stages handle cross-source linkage.
 
 ### Integration with Splink
 
@@ -641,7 +772,7 @@ edges = [(e['id_l'], e['id_r'], e['match_probability']) for e in edges]
 
 # Import into Starlings
 ef = sl.from_records("source", df)
-ef.add_collection("splink_output", edges=edges)
+ef.add_collection_from_edges("splink_output", edges)
 
 # Find optimal threshold using polars-inspired API
 sweep_results = ef.analyse(
@@ -667,13 +798,14 @@ import starlings as sl
 ef = sl.from_records("dataset", records)
 
 # Add collections
-ef.add_collection("predicted", edges=predicted_edges)
-ef.add_collection("truth", edges=true_edges)
+ef.add_collection_from_edges("predicted", predicted_edges)
+ef.add_collection_from_entities("truth", true_entities)
 
 # Use Starlings's efficient sweep
 sweep_results = ef.analyse(
     sl.col("predicted").sweep(0.5, 0.95),
-    sl.col("truth").at(1.0)
+    sl.col("truth").at(1.0),
+    metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision, sl.Metrics.eval.recall]
 )
 # Returns: [{"predicted_threshold": 0.5, "truth_threshold": 1.0, ...}, ...]
 
@@ -685,7 +817,8 @@ metrics = er_eval.evaluate(clusters, true_clusters)
 # Also supports American spelling
 comparison = ef.analyze(
     sl.col("predicted").at(0.85),
-    sl.col("truth").at(1.0)
+    sl.col("truth").at(1.0),
+    metrics=[sl.Metrics.eval.f1]
 )
 ```
 
@@ -705,7 +838,7 @@ edges = [(m['record_a'], m['record_b'], m['score']) for m in matches]
 
 # Create EntityFrame
 ef = sl.from_records("dataset", records)
-ef.add_collection("matchbox", edges=edges)
+ef.add_collection_from_edges("matchbox", edges)
 
 # Find optimal threshold
 sweep_results = ef.analyse(
@@ -772,6 +905,7 @@ ef = sl.EntityFrame.from_arrow(table)
   - Connected components with merge event extraction
   - Basic metrics (precision, recall, F1)
   - Partition reconstruction from merges
+  - Proper handling of isolated records
   
 - Week 9-12: Testing and optimisation
   - Comprehensive test suite
@@ -787,11 +921,13 @@ ef = sl.EntityFrame.from_arrow(table)
   - EntityFrame with multiple collections
   - DataContext sharing via Arc
   - ef.analyse() with expressions
+  - Immutable view pattern for collections
   
 - Week 4-6: Complete metrics suite
   - ARI, NMI, V-measure implementation
   - B-cubed metrics (semi-incremental)
   - Injectable metric functions
+  - Required metrics in Rust API
   
 - Week 7-9: Incremental computation
   - Metric state tracking between thresholds
@@ -822,7 +958,7 @@ ef = sl.EntityFrame.from_arrow(table)
   
 - Week 7-9: Memory optimisation
   - Automatic compaction on ef.drop()
-  - Collection.copy() for view detachment
+  - Collection.copy() for explicit detachment
   - Memory-mapped storage for large datasets
   - Mandatory quantisation support
   
@@ -843,8 +979,9 @@ ef = sl.EntityFrame.from_arrow(table)
   
 - Week 4-6: Advanced features
   - Custom metric plugins
-  - Collection.from_entities() and from_merge_events()
+  - Collection.from_entities() with type unions
   - Advanced Arrow serialisation
+  - Hierarchical resolution support
   
 - Week 7-9: Production tooling
   - Monitoring and metrics
@@ -935,7 +1072,8 @@ class StarlingsBenchmark:
         start = time.time()
         results = ef.analyse(
             sl.col("test").sweep(0, 1, 0.001),
-            sl.col("truth").at(1.0)
+            sl.col("truth").at(1.0),
+            metrics=[sl.Metrics.eval.f1]
         )
         return time.time() - start
     
@@ -963,7 +1101,7 @@ import starlings as sl
 
 ef = sl.from_records("data", df)
 edges = compute_edges(df)  # Your existing edge computation
-ef.add_collection("resolved", edges=edges)
+ef.add_collection_from_edges("resolved", edges)
 
 # Now can query any threshold instantly (after first reconstruction)
 partition = ef["resolved"].at(0.7)  # O(m) first time, O(1) after
@@ -972,7 +1110,8 @@ partition = ef["resolved"].at(0.85)  # O(1) if cached
 # Efficient sweep with incremental updates
 sweep_results = ef.analyse(
     sl.col("resolved").sweep(0.5, 0.95),
-    sl.col("truth").at(1.0)
+    sl.col("truth").at(1.0),
+    metrics=[sl.Metrics.eval.f1, sl.Metrics.eval.precision]
 )  # Returns List[Dict], O(k) between thresholds
 
 # Can convert to polars if needed
@@ -994,9 +1133,9 @@ import starlings as sl
 ef = sl.from_records("data", data)
 
 # Add as edges, not clusters
-ef.add_collection("splink", edges=splink_edges)
-ef.add_collection("dedupe", edges=dedupe_edges)
-ef.add_collection("truth", edges=truth_edges)
+ef.add_collection_from_edges("splink", splink_edges)
+ef.add_collection_from_edges("dedupe", dedupe_edges)
+ef.add_collection_from_entities("truth", truth_entities)
 
 # Compare systematically using expressions
 comparison = ef.analyse(
@@ -1010,7 +1149,8 @@ comparison = ef.analyse(
 # Find optimal thresholds efficiently
 splink_sweep = ef.analyse(
     sl.col("splink").sweep(0.5, 0.95),
-    sl.col("truth").at(1.0)
+    sl.col("truth").at(1.0),
+    metrics=[sl.Metrics.eval.f1]
 )
 # Convert to dataframe for analysis
 import polars as pl
@@ -1026,3 +1166,5 @@ optimal = df.filter(df['f1'] == df['f1'].max()).row(0, named=True)
 4. **Memory usage**: ~60-115MB for 1M edges with DataContext architecture
 5. **Sparse graphs assumed**: Starlings expects m << n² from blocking/LSH
 6. **Key types**: All key types (int/str/bytes) have equivalent performance after interning
+7. **Collection views**: Views from EntityFrames are immutable for safety
+8. **Isolated records**: Handled automatically in EntityFrame context
