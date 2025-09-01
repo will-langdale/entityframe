@@ -1,4 +1,4 @@
-site_name: "starlings"
+site_name: "Starlings"
 site_description: "Documentation for starlings"
 repo_url: "https://github.com/will-langdale/starlings"
 repo_name: "will-langdale/starlings"
@@ -7,12 +7,16 @@ nav:
 - Home: index.md
 - Design:
   - Overview: design/overview.md
-  - System architecture: design/foundations.md
-  - API design: design/implementation.md
-  - User interface design: design/reference.md
+  - First principles: design/principles.md
+  - Foundational constructs: design/algorithms.md
+  - Rust engine: design/engine.md
+  - Python API: design/interface.md
+  - Roadmap: design/roadmap.md
 
 theme:
   name: material
+  logo: assets/starling-logo.png
+  favicon: assets/starling-logo.png
   features:
     - content.code.copy
     - navigation.sections
@@ -30,15 +34,15 @@ theme:
         name: Switch to light mode
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: deep orange
-      accent: light blue
+      primary: indigo
+      accent: amber
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: orange
-      accent: cyan
+      primary: indigo
+      accent: amber
       toggle:
         icon: material/brightness-4
         name: Switch to system preference
@@ -111,3 +115,6 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/will-langdale/starlings
   generator: false
+
+extra_css:
+  - stylesheets/extra.css

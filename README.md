@@ -1,4 +1,6 @@
-# starlings
+# Starlings
+
+<img src="./docs/assets/starling-logo.png" alt="The Starlings logo" width="300" />
 
 **High-performance entity resolution evaluation for Python**
 

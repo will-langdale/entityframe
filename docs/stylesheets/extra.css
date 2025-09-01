@@ -1,0 +1,11 @@
+/* Starlings Theme */
+
+/* Just a subtle gradient on the header */
+.md-header {
+    background: linear-gradient(135deg, #5c6bc0 0%, #7e57c2 100%);
+}
+
+/* Slightly rounded code blocks */
+.highlight pre {
+    border-radius: 6px;
+}
