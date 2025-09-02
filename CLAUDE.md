@@ -25,7 +25,7 @@ Starlings revolutionises entity resolution by storing **merge events** rather th
 
 **Implementation Stack**:
 - **Rust core**: Performance-critical operations using RoaringBitmaps, Rayon parallelisation
-- **Python interface**: Polars-inspired expression API via PyO3
+- **Python interface**: Polars-inspired wrapper pattern via PyO3
 - **Arrow integration**: Efficient serialisation with dictionary encoding
 
 ## Architecture
@@ -49,7 +49,7 @@ src/
 - Root `Cargo.toml`: Workspace configuration for both Rust crates
 - Root `pyproject.toml`: Python package config, maturin points to starlings-py
 - `starlings-core`: Pure Rust business logic, can be used by other Rust projects
-- `starlings-py`: Thin PyO3 wrapper over starlings-core for Python integration
+- `starlings-py`: Thin PyO3 wrapper over starlings-core, exports PyCollection and PyPartition classes
 
 ## Development commands
 
@@ -135,25 +135,31 @@ Comprehensive design documents are available in `docs/design/`:
 
 These documents provide the complete technical specification for implementing Starlings from scratch.
 
-## API Design (Target)
+## API Design
 
-The target API follows Polars-inspired expression syntax:
+The current API follows the Polars wrapper pattern, where Rust classes (PyCollection, PyPartition) are wrapped in Python classes:
 
 ```python
 import starlings as sl
 
-# Create frame and add collections
-ef = sl.from_records("source", df)
-ef.add_collection_from_edges("splink", edges)
+# Create collection from edges
+edges = [
+    ("record_1", "record_2", 0.95),
+    ("record_2", "record_3", 0.85),
+    ("record_4", "record_5", 0.75),
+]
+collection = sl.Collection.from_edges(edges)
 
-# Analyse with expressions
-results = ef.analyse(
-    sl.col("splink").sweep(0.5, 0.95, 0.01),
-    sl.col("truth").at(1.0),
-    metrics=[sl.Metrics.eval.f1]
-)
-# Returns List[Dict]: uniform format for all operations
+# Get partition at specific threshold
+partition = collection.at(0.8)
+print(f"Entities: {len(partition.entities)}")
 ```
+
+**Implementation Pattern**:
+- `starlings-py` exports `PyCollection` and `PyPartition` classes from Rust
+- Python `__init__.py` imports these as private classes: `from .starlings import Collection as PyCollection`
+- Public Python API wraps Rust classes: `Collection` wraps `PyCollection`, `Partition` wraps `PyPartition`
+- This enables Python-friendly APIs whilst maintaining Rust performance
 
 ## Writing style guide
 

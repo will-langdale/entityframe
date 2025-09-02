@@ -60,9 +60,10 @@ This design provides several critical benefits:
 
 **starlings-py** (PyO3 Wrapper):
 - Thin wrapper over starlings-core
+- Exports PyCollection and PyPartition classes with `#[pyclass]`
 - Handles Python ↔ Rust type conversions
 - Minimal logic, just marshalling data
-- Uses standard `#[pymodule]` pattern (no auto-initialize)
+- Uses standard `#[pymodule]` pattern
 
 ## Development environment
 
@@ -213,10 +214,17 @@ def test_something(foo: bool, bar: int):
 
 ### PyO3 wrapper patterns
 
+**Class wrapping approach**:
+- Rust exports `PyCollection` and `PyPartition` classes via `#[pyclass]`
+- Python imports these as private: `from .starlings import Collection as PyCollection`
+- Python provides public wrapper classes that delegate to Rust implementations
+- This pattern matches Polars and enables Python-friendly APIs over Rust performance
+
 **Conversion functions**:
 - Handle Python type → Rust type conversions explicitly
 - Provide clear error messages for invalid Python inputs
 - Support standard Python types (int, str, bytes)
+- Use helper functions like `python_obj_to_key()` for type marshalling
 
 **Error handling**:
 - Map Rust errors to appropriate Python exceptions
