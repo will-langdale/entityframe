@@ -22,13 +22,13 @@ jobs:
     - name: Update Rust Cargo.toml version
       run: |
         VERSION=${{ steps.get-version.outputs.version }}
-        sed -i "s/^version = .*/version = \"$VERSION\"/" src/rust/starlings/Cargo.toml
+        sed -i "s/^version = .*/version = \"$VERSION\"/" src/rust/starlings-py/Cargo.toml
     
     - name: Upload Cargo.toml
       uses: actions/upload-artifact@v4
       with:
         name: cargo-toml
-        path: src/rust/starlings/Cargo.toml
+        path: src/rust/starlings-py/Cargo.toml
 
   build-wheels:
     name: Build wheels on ${{ matrix.os }}
@@ -48,7 +48,7 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: cargo-toml
-        path: src/rust/starlings/
+        path: src/rust/starlings-py/
     
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v6
@@ -99,7 +99,7 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: cargo-toml
-        path: src/rust/starlings/
+        path: src/rust/starlings-py/
     
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v6
