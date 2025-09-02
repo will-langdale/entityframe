@@ -30,21 +30,26 @@ Starlings revolutionises entity resolution by storing **merge events** rather th
 
 ## Architecture
 
-The project follows UV's proven structure with symmetrical organisation under `src/`:
+The project uses a professional two-crate architecture following the Polars pattern:
 
 ```
 src/
-├── python/starlings/    # Python package with main API
-├── rust/starlings/      # Rust crate with PyO3 bindings
-│   ├── Cargo.toml        # Rust-specific configuration
-│   └── src/lib.rs        # Rust implementation
-└── tests/                # Python test suite
+├── python/starlings/       # Python package with main API
+├── rust/
+│   ├── starlings-core/     # Pure Rust crate (zero PyO3 dependencies)
+│   │   ├── src/core/       # Data structures, algorithms
+│   │   ├── src/hierarchy/  # Partition hierarchies, merge events
+│   │   └── benches/        # Performance benchmarks
+│   └── starlings-py/       # Minimal PyO3 wrapper
+│       └── src/lib.rs      # Python bindings only
+└── tests/                  # Python integration test suite
 ```
 
 **Build system**: 
-- Root `Cargo.toml`: Workspace configuration
-- Root `pyproject.toml`: Python package config with maturin build backend
-- `src/rust/starlings/Cargo.toml`: Rust crate config with PyO3 dependencies
+- Root `Cargo.toml`: Workspace configuration for both Rust crates
+- Root `pyproject.toml`: Python package config, maturin points to starlings-py
+- `starlings-core`: Pure Rust business logic, can be used by other Rust projects
+- `starlings-py`: Thin PyO3 wrapper over starlings-core for Python integration
 
 ## Development commands
 
@@ -52,7 +57,7 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 
 - `just install`: Install development dependencies
 - `just build`: Build the Rust extension
-- `just test`: Module imports
+- `just test`: Run comprehensive test suite (Python integration + Rust core)
 - `just bench`: Run benchmarks
 - `just format`: Format and lint all code (Python + Rust)
 - `just clean`: Clean build artifacts
@@ -60,14 +65,29 @@ This project uses `just` as a command runner and `uv` for Python dependency mana
 
 ## Testing strategy
 
-The project currently has basic module import testing via `just test`. Full test suite implementation is planned for future milestones.
+The project uses a **two-layer testing approach** that achieves comprehensive coverage without PyO3 linking complications:
+
+**Layer 1: Pure Rust core tests** (33 tests)
+- All business logic tested in `starlings-core` crate
+- Zero PyO3 dependencies, no linking issues
+- Full coverage of data structures, algorithms, and edge cases
+- Run via: `cargo test -p starlings-core`
+
+**Layer 2: Python integration tests** (17 tests)
+- End-to-end testing of Python → Rust → Python data flow
+- Tests PyO3 wrapper functionality, type conversions, error handling
+- Validates real-world usage patterns and API contracts
+- Run via: `uv run pytest`
+
+This **"Rust Core with Python Bindings"** pattern ensures complete test coverage whilst avoiding complex PyO3 test configuration. The Rust core handles all business logic testing, whilst Python tests validate the integration boundary.
 
 ### Benchmarking
 
-Use `just bench` to run Rust benchmarks for performance validation:
-- Hierarchy construction performance (1k-10k edges)
+Use `just bench` to run Rust core benchmarks for performance validation:
+- Hierarchy construction performance (1k-10k edges) 
 - Scaling tests across different dataset sizes
 - Quantisation effect measurement
+- All benchmarks run against `starlings-core` for consistent results
 
 There is a house style for parameterising Python unit tests:
 
@@ -94,11 +114,13 @@ def test_something(foo: bool, bar: int):
 ## Project structure notes
 
 - All source code is contained within `src/` subdirectories
-- Root directory contains only configuration files and documentation  
-- Symmetrical naming: `src/python/starlings/` and `src/rust/starlings/`
-- Follows UV's proven structure for Rust/Python hybrid projects
-- Rust workspace allows for potential multiple crates
-- Python package structure supports both pure Python and Rust extension modules
+- Root directory contains only configuration files and documentation
+- **Two-crate architecture**: Separates pure Rust logic from Python bindings
+- `starlings-core`: Business logic, algorithms, data structures (pure Rust)
+- `starlings-py`: Minimal PyO3 wrapper over starlings-core (Python bindings)
+- Follows the **Polars pattern** for professional Rust/Python hybrid projects
+- Rust workspace configuration allows for clean dependency management
+- Architecture enables both Python usage and pure Rust library consumption
 
 ## Design Documentation
 

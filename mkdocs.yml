@@ -12,6 +12,7 @@ nav:
   - Rust engine: design/engine.md
   - Python API: design/interface.md
   - Roadmap: design/roadmap.md
+- Contributing: contributing.md
 
 theme:
   name: material

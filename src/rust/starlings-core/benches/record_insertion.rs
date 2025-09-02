@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use starlings::core::{DataContext, Key};
+use starlings_core::core::{DataContext, Key};
 
 fn benchmark_10k_unique_insertions(c: &mut Criterion) {
     c.bench_function("10k unique record insertions", |b| {

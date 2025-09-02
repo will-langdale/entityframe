@@ -1,6 +1,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use starlings::core::{DataContext, Key};
-use starlings::hierarchy::PartitionHierarchy;
+use starlings_core::core::{DataContext, Key};
+use starlings_core::hierarchy::PartitionHierarchy;
 use std::sync::Arc;
 
 fn generate_test_edges(num_edges: usize) -> (Vec<(u32, u32, f64)>, Arc<DataContext>) {

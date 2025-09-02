@@ -34,7 +34,7 @@ build-backend = "maturin"
 [tool.maturin]
 python-source = "src/python"
 module-name = "starlings.starlings"
-manifest-path = "src/rust/starlings/Cargo.toml"
+manifest-path = "src/rust/starlings-py/Cargo.toml"
 
 [dependency-groups]
 dev = [
