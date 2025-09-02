@@ -1,0 +1,16 @@
+[package]
+name = "starlings-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "starlings"
+crate-type = ["cdylib"]
+
+[dependencies]
+starlings-core = { path = "../starlings-core" }
+pyo3 = { version = "0.26", features = ["extension-module"] }
+
+[features]
+# Extension module is always enabled for this crate
+default = []

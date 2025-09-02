@@ -860,7 +860,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
-name = "starlings"
+name = "starlings-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
@@ -872,13 +872,20 @@ dependencies = [
  "fxhash",
  "hex",
  "lru",
- "pyo3",
  "rayon",
  "roaring",
  "rustc-hash",
  "sha2",
  "sha3",
  "string-interner",
+]
+
+[[package]]
+name = "starlings-py"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "starlings-core",
 ]
 
 [[package]]

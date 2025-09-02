@@ -1,6 +1,10 @@
 pub mod core;
 pub mod hierarchy;
 
+// Re-export commonly used types for easier access
+pub use core::{DataContext, Key};
+pub use hierarchy::{MergeEvent, PartitionHierarchy, PartitionLevel};
+
 #[cfg(test)]
 mod tests {
     use super::core::{DataContext, Key};

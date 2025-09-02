@@ -6,22 +6,15 @@ default: python rust
 
 # Run Python tests
 python:
+    @echo "Running Python tests..."
     uv run pytest
 
 # Run only Rust tests
 rust:
-    @echo "Building Rust extension for tests..."
-    uv run maturin develop
-    #!/usr/bin/env bash
-    # Set the python interpreter for PYO3
-    export PYO3_PYTHON=$(uv run which python)
-    cargo test --no-default-features
+    @echo "Running Rust core tests..."
+    cargo test -p starlings-core
 
 # Internal benchmark runner
 _bench:
-    @echo "Building Rust extension for benchmarks..."
-    uv run maturin develop
-    #!/usr/bin/env bash
-    # Set the python interpreter for PYO3
-    export PYO3_PYTHON=$(uv run which python)
-    cargo bench
+    @echo "Running Rust core benchmarks..."
+    cargo bench -p starlings-core
