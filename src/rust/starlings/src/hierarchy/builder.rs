@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use super::merge_event::MergeEvent;
+use super::partition::PartitionLevel;
 use crate::core::DataContext;
 
 /// Represents a hierarchy of merge events that can generate partitions at any threshold
@@ -22,7 +23,6 @@ pub struct PartitionHierarchy {
 
     /// Secondary: Cache for frequently accessed partitions
     /// Using u32 keys (threshold * 1_000_000) for exact comparison
-    #[allow(dead_code)]
     partition_cache: LruCache<u32, PartitionLevel>,
 
     /// Index for binary search on thresholds (using integer keys)
@@ -32,16 +32,6 @@ pub struct PartitionHierarchy {
     /// Configuration
     #[allow(dead_code)]
     cache_size: usize,
-}
-
-/// Represents a partition at a specific threshold level
-#[derive(Debug, Clone)]
-pub struct PartitionLevel {
-    threshold: f64,
-    /// Entities as sets of record indices (RoaringBitmaps)
-    entities: Vec<RoaringBitmap>,
-    /// Pre-computed entity sizes for quick access
-    entity_sizes: Vec<u32>,
 }
 
 impl PartitionHierarchy {
@@ -245,37 +235,96 @@ impl PartitionHierarchy {
     pub fn merge_events(&self) -> &[MergeEvent] {
         &self.merges
     }
-}
 
-impl PartitionLevel {
-    /// Create a new partition level
-    pub fn new(threshold: f64, entities: Vec<RoaringBitmap>) -> Self {
-        let entity_sizes = entities.iter().map(|e| e.len() as u32).collect();
-        Self {
-            threshold,
-            entities,
-            entity_sizes,
+    /// Get a partition at a specific threshold
+    ///
+    /// Returns a reference to the partition at the given threshold. Partitions are cached
+    /// using an LRU cache for efficient repeated access. The first access to a threshold
+    /// requires O(m) reconstruction, but subsequent accesses are O(1) from cache.
+    ///
+    /// # Arguments
+    /// * `threshold` - The threshold value between 0.0 and 1.0
+    ///
+    /// # Returns
+    /// A reference to the PartitionLevel at the specified threshold
+    ///
+    /// # Panics
+    /// Panics if threshold is not between 0.0 and 1.0
+    pub fn at_threshold(&mut self, threshold: f64) -> &PartitionLevel {
+        // Validate threshold
+        assert!(
+            (0.0..=1.0).contains(&threshold),
+            "Threshold must be between 0.0 and 1.0, got {}",
+            threshold
+        );
+
+        let key = Self::threshold_to_key(threshold);
+
+        // Check if already cached
+        if self.partition_cache.contains(&key) {
+            return self.partition_cache.get(&key).unwrap();
         }
+
+        // Reconstruct the partition
+        let partition = self.reconstruct_at_threshold(threshold);
+
+        // Store in cache and return reference
+        self.partition_cache.put(key, partition);
+        self.partition_cache.get(&key).unwrap()
     }
 
-    /// Get the threshold for this partition
-    pub fn threshold(&self) -> f64 {
-        self.threshold
-    }
+    /// Reconstruct a partition at a specific threshold
+    ///
+    /// This method rebuilds the partition from scratch by applying all merge events
+    /// with threshold >= the requested threshold.
+    ///
+    /// # Complexity
+    /// O(m + n) where m = number of merge events and n = number of records
+    fn reconstruct_at_threshold(&self, threshold: f64) -> PartitionLevel {
+        let num_records = self.context.len();
 
-    /// Get the entities in this partition
-    pub fn entities(&self) -> &[RoaringBitmap] {
-        &self.entities
-    }
+        // Start with all records as singletons
+        let mut uf = UnionFind::new(num_records);
 
-    /// Get the number of entities
-    pub fn num_entities(&self) -> usize {
-        self.entities.len()
-    }
+        // Apply all merges with threshold >= requested threshold
+        for merge in &self.merges {
+            if merge.threshold >= threshold {
+                // Collect all records from all merging groups
+                let mut all_records = Vec::new();
+                for group in &merge.merging_groups {
+                    for record in group.iter() {
+                        all_records.push(record);
+                    }
+                }
 
-    /// Get entity sizes
-    pub fn entity_sizes(&self) -> &[u32] {
-        &self.entity_sizes
+                // Union all records together (using first as representative)
+                if let Some(&first) = all_records.first() {
+                    for &record in all_records.iter().skip(1) {
+                        uf.union(first as usize, record as usize);
+                    }
+                }
+            } else {
+                // Merges are sorted by descending threshold, so we can stop
+                break;
+            }
+        }
+
+        // Convert union-find to partition with entities
+        let mut entities_map: HashMap<usize, RoaringBitmap> = HashMap::new();
+
+        // Include ALL records from the context (handles isolates)
+        for record_idx in 0..num_records {
+            let root = uf.find(record_idx);
+            entities_map
+                .entry(root)
+                .or_default()
+                .insert(record_idx as u32);
+        }
+
+        // Convert HashMap to Vec of entities
+        let entities: Vec<RoaringBitmap> = entities_map.into_values().collect();
+
+        PartitionLevel::new(threshold, entities)
     }
 }
 
@@ -420,5 +469,171 @@ mod tests {
 
         // Should panic with quantise=0
         PartitionHierarchy::from_edges(edges, ctx, 0);
+    }
+
+    #[test]
+    fn test_threshold_0_one_entity() {
+        let ctx = create_test_context();
+
+        // Create edges connecting all nodes
+        let edges = vec![
+            (0, 1, 0.8), // A-B
+            (1, 2, 0.6), // B-C
+        ];
+
+        let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
+
+        // At threshold 0.0, all records should be in one entity
+        let partition = hierarchy.at_threshold(0.0);
+
+        assert_eq!(partition.threshold(), 0.0);
+        assert_eq!(partition.num_entities(), 1);
+        assert_eq!(partition.total_records(), 3);
+
+        // Verify all records are in the same entity
+        let entity = &partition.entities()[0];
+        assert!(entity.contains(0));
+        assert!(entity.contains(1));
+        assert!(entity.contains(2));
+    }
+
+    #[test]
+    fn test_threshold_1_all_singletons() {
+        let ctx = create_test_context();
+
+        // Create edges with weights less than 1.0
+        let edges = vec![
+            (0, 1, 0.8), // A-B
+            (1, 2, 0.6), // B-C
+        ];
+
+        let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
+
+        // At threshold 1.0, each record should be a singleton
+        let partition = hierarchy.at_threshold(1.0);
+
+        assert_eq!(partition.threshold(), 1.0);
+        assert_eq!(partition.num_entities(), 3);
+        assert_eq!(partition.total_records(), 3);
+
+        // Each entity should have exactly one record
+        for entity in partition.entities() {
+            assert_eq!(entity.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_threshold_intermediate() {
+        let ctx = create_test_context();
+
+        // Create edges: A-B at 0.8, B-C at 0.4
+        let edges = vec![
+            (0, 1, 0.8), // A-B
+            (1, 2, 0.4), // B-C
+        ];
+
+        let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
+
+        // At threshold 0.5, A-B should be merged but C separate
+        let partition = hierarchy.at_threshold(0.5);
+
+        assert_eq!(partition.threshold(), 0.5);
+        assert_eq!(partition.num_entities(), 2);
+
+        // Find which entity contains A and B
+        let entity_a = partition.find_entity_for_record(0).unwrap();
+        let entity_b = partition.find_entity_for_record(1).unwrap();
+        let entity_c = partition.find_entity_for_record(2).unwrap();
+
+        // A and B should be in the same entity
+        assert_eq!(entity_a, entity_b);
+        // C should be in a different entity
+        assert_ne!(entity_a, entity_c);
+    }
+
+    #[test]
+    fn test_isolates_as_singletons() {
+        let mut ctx = DataContext::new();
+
+        // Create 5 records
+        for i in 0..5 {
+            ctx.ensure_record("test", Key::U32(i));
+        }
+        let ctx = Arc::new(ctx);
+
+        // Only connect some records, leaving 3 and 4 as isolates
+        let edges = vec![
+            (0, 1, 0.8), // Connect 0-1
+            (1, 2, 0.6), // Connect 1-2
+        ];
+
+        let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
+
+        // At threshold 0.5, should have:
+        // - One entity with {0, 1, 2}
+        // - Two singleton entities for isolates {3} and {4}
+        let partition = hierarchy.at_threshold(0.5);
+
+        assert_eq!(partition.num_entities(), 3);
+        assert_eq!(partition.total_records(), 5);
+
+        // Verify isolates exist as singletons
+        assert!(partition.contains_record(3));
+        assert!(partition.contains_record(4));
+
+        // Count singleton entities
+        let singleton_count = partition.entities().iter().filter(|e| e.len() == 1).count();
+        assert_eq!(singleton_count, 2); // Two isolates
+    }
+
+    #[test]
+    fn test_cache_functionality() {
+        let ctx = create_test_context();
+
+        let edges = vec![(0, 1, 0.8), (1, 2, 0.6)];
+
+        let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
+
+        // First access - should reconstruct
+        let partition1 = hierarchy.at_threshold(0.7);
+        assert_eq!(partition1.threshold(), 0.7);
+
+        // Second access to same threshold - should hit cache
+        let partition2 = hierarchy.at_threshold(0.7);
+        assert_eq!(partition2.threshold(), 0.7);
+
+        // Access different thresholds to test cache capacity
+        for i in 0..15 {
+            let threshold = (i as f64 * 0.05 * 100.0).round() / 100.0; // Round to avoid fp precision issues
+            let partition = hierarchy.at_threshold(threshold);
+            assert!((partition.threshold() - threshold).abs() < 1e-10);
+        }
+
+        // Original threshold might be evicted due to LRU cache size limit
+        // But should still work correctly
+        let partition3 = hierarchy.at_threshold(0.7);
+        assert!((partition3.threshold() - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    #[should_panic(expected = "Threshold must be between 0.0 and 1.0")]
+    fn test_invalid_threshold_negative() {
+        let ctx = create_test_context();
+        let edges = vec![(0, 1, 0.5)];
+        let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
+
+        // Should panic with negative threshold
+        hierarchy.at_threshold(-0.1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Threshold must be between 0.0 and 1.0")]
+    fn test_invalid_threshold_too_large() {
+        let ctx = create_test_context();
+        let edges = vec![(0, 1, 0.5)];
+        let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
+
+        // Should panic with threshold > 1.0
+        hierarchy.at_threshold(1.1);
     }
 }

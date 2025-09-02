@@ -3,7 +3,7 @@ name = "starlings"
 dynamic = ["version"]
 description = "A Python package for comparing entity resolutions from different processes"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
 license = {file = "LICENSE"}
 authors = [
@@ -14,7 +14,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -66,3 +65,44 @@ markers = [
 [tool.uv]
 # Prevent uv sync from building the package - use just build instead
 package = false
+
+[tool.ruff]
+exclude = [
+    "*.ipynb"
+]
+line-length = 88
+indent-width = 4
+target-version = "py310"
+src = ["src"]
+preview = true
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "B",
+    "D",
+    "UP",
+    "TID",
+    "BLE",
+    "PLC",
+    "SIM"
+]
+ignore = []
+fixable = ["ALL"]
+unfixable = []
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"**/{test,docs}/*" = ["D"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true

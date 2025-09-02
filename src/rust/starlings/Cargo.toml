@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "hierarchy_construction"
 harness = false
+
+[[bench]]
+name = "partition_reconstruction"
+harness = false
