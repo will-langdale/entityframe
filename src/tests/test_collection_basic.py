@@ -13,7 +13,7 @@ class TestCollectionBasic:
         collection = starlings.Collection.from_edges([])
         partition = collection.at(0.5)
         assert len(partition) == 0
-        assert partition.entities() == []
+        assert partition.entities == []
     
     def test_single_edge_collection(self):
         """Test collection with single edge."""
@@ -22,13 +22,13 @@ class TestCollectionBasic:
         
         # At threshold 1.0, should be two separate entities
         partition_high = collection.at(1.0)
-        entities_high = partition_high.entities()
+        entities_high = partition_high.entities
         assert len(entities_high) == 2
         assert all(len(entity) == 1 for entity in entities_high)
         
         # At threshold 0.5, should be merged into one entity
         partition_low = collection.at(0.5)
-        entities_low = partition_low.entities()
+        entities_low = partition_low.entities
         assert len(entities_low) == 1
         assert len(entities_low[0]) == 2
     
@@ -47,7 +47,7 @@ class TestCollectionBasic:
         
         # At threshold 0.6, all merged
         partition_low = collection.at(0.6)
-        entities_low = partition_low.entities()
+        entities_low = partition_low.entities
         assert len(entities_low) == 1
         assert len(entities_low[0]) == 4
     
@@ -65,7 +65,7 @@ class TestCollectionBasic:
         
         # At threshold 0.5, two connected components
         partition_mid = collection.at(0.5)
-        entities_mid = partition_mid.entities()
+        entities_mid = partition_mid.entities
         assert len(entities_mid) == 2
         assert all(len(entity) == 2 for entity in entities_mid)
     
@@ -78,7 +78,7 @@ class TestCollectionBasic:
         
         # Should have connected pair at low threshold
         partition_low = collection.at(0.5)
-        entities_low = partition_low.entities()
+        entities_low = partition_low.entities
         assert len(entities_low) == 1  # Only the connected pair
         assert len(entities_low[0]) == 2
         
@@ -98,7 +98,7 @@ class TestCollectionBasic:
         
         # Should handle all key types without errors
         partition = collection.at(0.5)
-        entities = partition.entities()
+        entities = partition.entities
         
         # Should have entities (exact count depends on merge thresholds)
         assert len(entities) > 0
@@ -110,7 +110,7 @@ class TestCollectionBasic:
         
         # At exactly threshold value, should be merged
         partition_exact = collection.at(0.5)
-        entities_exact = partition_exact.entities()
+        entities_exact = partition_exact.entities
         assert len(entities_exact) == 1
         assert len(entities_exact[0]) == 2
         
@@ -120,7 +120,7 @@ class TestCollectionBasic:
         
         # Just below threshold, should be merged
         partition_below = collection.at(0.49999)
-        entities_below = partition_below.entities()
+        entities_below = partition_below.entities
         assert len(entities_below) == 1
         assert len(entities_below[0]) == 2
     
@@ -134,7 +134,7 @@ class TestCollectionBasic:
         
         # At 0.0, should merge at or below minimum edge threshold
         partition_zero = collection.at(0.0)
-        entities_zero = partition_zero.entities()
+        entities_zero = partition_zero.entities
         # With thresholds 0.8 and 0.6, at 0.0 both edges should be active
         # This should result in 2 separate pairs
         assert len(entities_zero) == 2
@@ -157,7 +157,7 @@ class TestCollectionBasic:
         collection = starlings.Collection.from_edges(edges)
         
         partition = collection.at(0.5)
-        entities = partition.entities()
+        entities = partition.entities
         
         # Should handle large integers without overflow
         assert len(entities) == 2  # Two separate pairs
@@ -178,14 +178,14 @@ class TestCollectionBasic:
         edges = [("a", "b", 0.8)]
         collection = starlings.Collection.from_edges(edges)
         
-        # Collection should show PyCollection
+        # Collection should show Collection
         repr_str = repr(collection)
-        assert "PyCollection" in repr_str
+        assert "Collection" in repr_str
         
         # Partition should show entity count
         partition = collection.at(0.5)
         partition_repr = repr(partition)
-        assert "PyPartition" in partition_repr
+        assert "Partition" in partition_repr
         assert "entities=" in partition_repr
     
     def test_threshold_caching_consistency(self):
@@ -203,8 +203,8 @@ class TestCollectionBasic:
         partition3 = collection.at(0.7)
         
         # Results should be identical
-        assert partition1.entities() == partition2.entities()
-        assert partition2.entities() == partition3.entities()
+        assert partition1.entities == partition2.entities
+        assert partition2.entities == partition3.entities
         assert len(partition1) == len(partition2) == len(partition3)
 
 
@@ -220,7 +220,7 @@ class TestCollectionAdvanced:
         partition = collection.at(0.5)
         
         # Should still work correctly
-        entities = partition.entities()
+        entities = partition.entities
         assert len(entities) == 1
         assert len(entities[0]) == 2
     
@@ -230,7 +230,7 @@ class TestCollectionAdvanced:
         collection = starlings.Collection.from_edges(edges)
         
         partition = collection.at(0.5)
-        entities = partition.entities()
+        entities = partition.entities
         assert len(entities) == 1
         assert len(entities[0]) == 2
     
@@ -245,7 +245,7 @@ class TestCollectionAdvanced:
         
         # Should handle duplicates gracefully
         partition = collection.at(0.5)
-        entities = partition.entities()
+        entities = partition.entities
         assert len(entities) == 1
         assert len(entities[0]) == 2
 
