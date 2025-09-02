@@ -11,8 +11,8 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
-    
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
     steps:
     - uses: actions/checkout@v5
     
@@ -52,7 +52,7 @@ jobs:
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v6
       with:
-        python-version: "3.13"
+        python-version: "3.10"
 
     - name: Install just
       uses: extractions/setup-just@v2
@@ -80,7 +80,7 @@ jobs:
     - name: Install uv and Python
       uses: astral-sh/setup-uv@v6
       with:
-        python-version: "3.13"
+        python-version: "3.10"
     
     - name: Set up Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -106,7 +106,7 @@ jobs:
       - name: Install uv and Python
         uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.13"
+          python-version: "3.10"
 
       - name: Install just
         uses: extractions/setup-just@v2
@@ -126,7 +126,7 @@ jobs:
       - name: Install uv and Python
         uses: astral-sh/setup-uv@v6
         with:
-          python-version: "3.13"
+          python-version: "3.10"
 
       - name: Install just
         uses: extractions/setup-just@v2
