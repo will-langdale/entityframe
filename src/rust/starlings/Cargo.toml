@@ -8,7 +8,7 @@ name = "starlings"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.23" }
+pyo3 = { version = "0.26" }
 roaring = "0.10"
 rustc-hash = "2.0"
 digest = "0.10"
@@ -28,7 +28,7 @@ extension-module = ["pyo3/extension-module"]
 default = ["extension-module"]
 
 [dev-dependencies]
-pyo3 = { version = "0.23", features = ["auto-initialize"] }
+pyo3 = { version = "0.26", features = ["auto-initialize"] }
 criterion = "0.5"
 fastrand = "2.0"
 
@@ -38,4 +38,8 @@ harness = false
 
 [[bench]]
 name = "hierarchy_construction"
+harness = false
+
+[[bench]]
+name = "partition_reconstruction"
 harness = false
