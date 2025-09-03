@@ -4,7 +4,9 @@ dynamic = ["version"]
 description = "A Python package for comparing entity resolutions from different processes"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "numpy>=2.2.6",
+]
 license = {file = "LICENSE"}
 authors = [
     {name = "Will Langdale"}

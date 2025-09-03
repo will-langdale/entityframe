@@ -11,8 +11,8 @@ build:
 
 # Format and lint all code (Python + Rust)
 format:
-    uvx ruff check src/python/ --fix
-    uvx ruff format src/python/
+    uvx ruff check src/ --fix
+    uvx ruff format src/
     uvx mypy src/python/
     cargo fmt
     cargo clippy

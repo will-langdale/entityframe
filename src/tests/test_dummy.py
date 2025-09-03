@@ -1,6 +1,8 @@
 """Placeholder unit test."""
 
+import starlings
+
 
 def test_starlings_import():
     """Test that the starlings module can be imported."""
-    import starlings  # noqa: F401
+    assert starlings is not None
