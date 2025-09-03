@@ -1,8 +1,14 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyType};
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use starlings_core::test_utils::{GraphConfig, ThresholdConfig};
 use starlings_core::{DataContext, Key, PartitionHierarchy, PartitionLevel};
+
+/// Type alias for graph generation result to reduce complexity
+type GraphResult = PyResult<(Vec<(i64, i64, f64)>, usize)>;
+// use starlings_core::test_utils::{GraphConfig, ThresholdConfig, generate_hierarchical_graph as generate_graph};
 
 /// A partition of records into entities at a specific threshold.
 ///
@@ -139,25 +145,42 @@ impl PyCollection {
         let context = DataContext::new();
         let mut rust_edges = Vec::with_capacity(edges.len());
 
-        // Pre-allocate space for records (estimate 2 unique records per edge on average)
-        context.reserve(edges.len());
-
-        // Efficiently convert all Python keys to Rust edges with optimised batching
+        // Efficiently convert all Python keys to Rust edges with optimised bulk processing
         #[cfg(debug_assertions)]
         let conversion_start = std::time::Instant::now();
 
-        // Pre-size the vectors for better performance
-        rust_edges.reserve(edges.len());
+        // Phase 1: Bulk Python object extraction with deduplication
+        let mut key_to_id: HashMap<Key, u32> = HashMap::new();
+        let mut extracted_edges = Vec::with_capacity(edges.len());
+
+        // Pre-allocate estimated capacity based on edge count (assume ~70% unique keys)
+        key_to_id.reserve(edges.len().saturating_mul(7) / 10);
+        context.reserve(edges.len().saturating_mul(7) / 10);
 
         for (key1_obj, key2_obj, threshold) in edges {
-            // Convert Python objects to Rust Keys (optimised for common cases)
+            // Convert Python objects to Rust Keys (bulk extraction)
             let key1 = python_obj_to_key_fast(key1_obj, py)?;
             let key2 = python_obj_to_key_fast(key2_obj, py)?;
 
-            // Ensure records exist in context
-            let id1 = context.ensure_record(&source_name, key1);
-            let id2 = context.ensure_record(&source_name, key2);
+            extracted_edges.push((key1, key2, threshold));
+        }
 
+        // Phase 2: Batch key registration with deduplication
+        for (key1, key2, _) in &extracted_edges {
+            if !key_to_id.contains_key(key1) {
+                let id = context.ensure_record(&source_name, key1.clone());
+                key_to_id.insert(key1.clone(), id);
+            }
+            if !key_to_id.contains_key(key2) {
+                let id = context.ensure_record(&source_name, key2.clone());
+                key_to_id.insert(key2.clone(), id);
+            }
+        }
+
+        // Phase 3: Build final edge list with ID lookups
+        for (key1, key2, threshold) in extracted_edges {
+            let id1 = key_to_id[&key1];
+            let id2 = key_to_id[&key2];
             rust_edges.push((id1, id2, threshold));
         }
         #[cfg(debug_assertions)]
@@ -245,6 +268,150 @@ impl PyCollection {
     }
 }
 
+/// Configuration for generating realistic entity resolution graphs.
+///
+/// This mirrors production entity resolution patterns with hierarchical threshold structures
+/// and realistic component distributions for benchmarking and testing.
+#[pyclass(name = "GraphConfig")]
+#[derive(Clone)]
+pub struct PyGraphConfig {
+    config: GraphConfig,
+}
+
+#[pymethods]
+impl PyGraphConfig {
+    /// Create a new graph configuration.
+    ///
+    /// Args:
+    ///     n_left (int): Number of left-side records (e.g., customers)
+    ///     n_right (int): Number of right-side records (e.g., transactions)
+    ///     n_isolates (int): Number of isolated records (no edges)
+    ///     thresholds (List[Tuple[float, int]]): List of (threshold, target_entities) pairs
+    ///
+    /// Returns:
+    ///     GraphConfig: New graph configuration
+    ///
+    /// Example:
+    ///     ```python
+    ///     config = GraphConfig(1000, 1000, 0, [(0.9, 500), (0.7, 300)])
+    ///     ```
+    #[new]
+    fn new(
+        n_left: usize,
+        n_right: usize,
+        n_isolates: usize,
+        thresholds: Vec<(f64, usize)>,
+    ) -> Self {
+        let threshold_configs: Vec<ThresholdConfig> = thresholds
+            .into_iter()
+            .map(|(threshold, target_entities)| ThresholdConfig {
+                threshold,
+                target_entities,
+            })
+            .collect();
+
+        Self {
+            config: GraphConfig {
+                n_left,
+                n_right,
+                n_isolates,
+                thresholds: threshold_configs,
+            },
+        }
+    }
+
+    /// Create a production-scale configuration for million-record testing.
+    ///
+    /// Returns a pre-configured GraphConfig suitable for production-scale testing
+    /// with 1.1M records and hierarchical thresholds.
+    ///
+    /// Returns:
+    ///     GraphConfig: Production-scale configuration
+    ///
+    /// Example:
+    ///     ```python
+    ///     config = GraphConfig.production_1m()
+    ///     # 550k left + 550k right records
+    ///     # Thresholds: 0.9 -> 200k entities, 0.7 -> 100k entities, 0.5 -> 50k entities
+    ///     ```
+    #[classmethod]
+    fn production_1m(_cls: &Bound<'_, PyType>) -> Self {
+        Self {
+            config: GraphConfig::production_1m(),
+        }
+    }
+
+    /// Create a large-scale configuration for 10M+ record testing.
+    ///
+    /// Returns a pre-configured GraphConfig suitable for very large-scale testing
+    /// with 11M records and hierarchical thresholds.
+    ///
+    /// Returns:
+    ///     GraphConfig: Large-scale configuration  
+    ///
+    /// Example:
+    ///     ```python
+    ///     config = GraphConfig.production_10m()
+    ///     # 5.5M left + 5.5M right records
+    ///     ```
+    #[classmethod]
+    fn production_10m(_cls: &Bound<'_, PyType>) -> Self {
+        Self {
+            config: GraphConfig::production_10m(),
+        }
+    }
+
+    /// String representation for debugging.
+    fn __repr__(&self) -> String {
+        format!(
+            "GraphConfig(n_left={}, n_right={}, n_isolates={}, thresholds={})",
+            self.config.n_left,
+            self.config.n_right,
+            self.config.n_isolates,
+            self.config.thresholds.len()
+        )
+    }
+}
+
+/// Generate a hierarchical graph with realistic entity resolution patterns.
+///
+/// Creates a bipartite graph with exact component counts at specified thresholds,
+/// using the hierarchical block construction method to ensure correct component
+/// distributions that mirror production entity resolution patterns.
+///
+/// Args:
+///     config (GraphConfig): Configuration specifying graph structure and thresholds
+///
+/// Returns:
+///     Tuple[List[Tuple[Any, Any, float]], int]: (edges, total_nodes)
+///         edges: List of (left_id, right_id, similarity) tuples
+///         total_nodes: Total number of nodes in the graph
+///
+/// Complexity:
+///     O(n + m) where n = nodes, m = edges
+///
+/// Example:
+///     ```python
+///     config = GraphConfig.production_1m()
+///     edges, total_nodes = generate_hierarchical_graph(config)
+///     
+///     collection = Collection.from_edges(edges)
+///     partition = collection.at(0.9)
+///     print(f"Entities at 0.9: {len(partition.entities)}")
+///     ```
+#[pyfunction]
+fn generate_hierarchical_graph(config: PyGraphConfig, _py: Python<'_>) -> GraphResult {
+    let graph_data = starlings_core::test_utils::generate_hierarchical_graph(config.config);
+
+    let python_edges: Vec<(i64, i64, f64)> = graph_data
+        .edges
+        .into_iter()
+        .map(|(id1, id2, weight)| (id1 as i64, id2 as i64, weight))
+        .collect();
+
+    Ok((python_edges, graph_data.total_nodes))
+}
+
 /// Convert Python object to Rust Key (optimised for performance)
 fn python_obj_to_key_fast(obj: Py<PyAny>, py: Python) -> PyResult<Key> {
     // Try integer types first (most common in large datasets)
@@ -274,5 +441,7 @@ fn python_obj_to_key_fast(obj: Py<PyAny>, py: Python) -> PyResult<Key> {
 fn starlings(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCollection>()?;
     m.add_class::<PyPartition>()?;
+    m.add_class::<PyGraphConfig>()?;
+    m.add_function(wrap_pyfunction!(generate_hierarchical_graph, m)?)?;
     Ok(())
 }

@@ -53,6 +53,27 @@ impl BitmapPool {
         )
     }
 
+    /// Create a bitmap pool scaled for expected dataset size
+    ///
+    /// Automatically sizes pools based on edge count to minimize allocation overhead
+    /// at large scales. For 10M+ edges, uses pools 10-100x larger than default.
+    pub fn new_for_scale(num_edges: usize) -> Self {
+        // Scale pools based on dataset size with reasonable limits
+        let scale_factor = match num_edges {
+            0..=10_000 => 1,              // Small datasets: default pools
+            10_001..=100_000 => 2,        // Medium datasets: 2x pools
+            100_001..=1_000_000 => 5,     // Large datasets: 5x pools
+            1_000_001..=10_000_000 => 20, // Very large: 20x pools
+            _ => 50,                      // Massive datasets: 50x pools
+        };
+
+        let small_pool_size = (Self::DEFAULT_SMALL_POOL_SIZE * scale_factor).min(50_000);
+        let medium_pool_size = (Self::DEFAULT_MEDIUM_POOL_SIZE * scale_factor).min(5_000);
+        let large_pool_size = (Self::DEFAULT_LARGE_POOL_SIZE * scale_factor).min(500);
+
+        Self::with_capacity(small_pool_size, medium_pool_size, large_pool_size)
+    }
+
     /// Create a bitmap pool with custom capacity limits
     pub fn with_capacity(max_small: usize, max_medium: usize, max_large: usize) -> Self {
         Self {

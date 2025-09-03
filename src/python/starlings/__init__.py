@@ -44,7 +44,44 @@ from importlib.metadata import version  # noqa: PLC0415
 from typing import Any, cast
 
 from .starlings import Collection as PyCollection
+from .starlings import GraphConfig as PyGraphConfig
 from .starlings import Partition as PyPartition
+from .starlings import generate_hierarchical_graph as _generate_hierarchical_graph
+
+
+def generate_hierarchical_graph(
+    config: GraphConfig,
+) -> tuple[list[tuple[int, int, float]], int]:
+    """Generate a hierarchical graph with realistic entity resolution patterns.
+
+    Creates a bipartite graph with exact component counts at specified thresholds,
+    using the hierarchical block construction method to ensure correct component
+    distributions that mirror production entity resolution patterns.
+
+    Args:
+        config: GraphConfig specifying graph structure and thresholds
+
+    Returns:
+        Tuple of (edges, total_nodes) where:
+        - edges: List of (left_id, right_id, similarity) tuples
+        - total_nodes: Total number of nodes in the graph
+
+    Complexity:
+        O(n + m) where n = nodes, m = edges
+
+    Example:
+        ```python
+        config = GraphConfig.production_1m()
+        edges, total_nodes = generate_hierarchical_graph(config)
+
+        collection = Collection.from_edges(edges)
+        partition = collection.at(0.9)
+        print(f"Entities at 0.9: {len(partition.entities)}")
+        ```
+    """
+    result = _generate_hierarchical_graph(config._config)
+    return result  # type: ignore[no-any-return]
+
 
 __version__ = version("starlings")
 
@@ -234,3 +271,93 @@ class Collection:
     def __repr__(self) -> str:
         """String representation for debugging."""
         return "Collection"
+
+
+class GraphConfig:
+    """Configuration for generating realistic entity resolution graphs.
+
+    This mirrors production entity resolution patterns with hierarchical threshold
+    structures and realistic component distributions for benchmarking and testing.
+
+    Example:
+        ```python
+        # Custom configuration
+        config = GraphConfig(1000, 1000, 0, [(0.9, 500), (0.7, 300)])
+
+        # Production-scale configurations
+        config_1m = GraphConfig.production_1m()
+        config_10m = GraphConfig.production_10m()
+
+        # Generate graph
+        edges, total_nodes = generate_hierarchical_graph(config_1m)
+        collection = Collection.from_edges(edges)
+        ```
+    """
+
+    def __init__(
+        self,
+        n_left: int,
+        n_right: int,
+        n_isolates: int,
+        thresholds: list[tuple[float, int]],
+    ) -> None:
+        """Create a new graph configuration.
+
+        Args:
+            n_left: Number of left-side records (e.g., customers)
+            n_right: Number of right-side records (e.g., transactions)
+            n_isolates: Number of isolated records (no edges)
+            thresholds: List of (threshold, target_entities) pairs
+
+        Example:
+            ```python
+            config = GraphConfig(1000, 1000, 0, [(0.9, 500), (0.7, 300)])
+            ```
+        """
+        self._config = PyGraphConfig(n_left, n_right, n_isolates, thresholds)
+
+    @classmethod
+    def production_1m(cls) -> GraphConfig:
+        """Create a production-scale configuration for million-record testing.
+
+        Returns a pre-configured GraphConfig suitable for production-scale testing
+        with 1.1M records and hierarchical thresholds.
+
+        Returns:
+            Production-scale configuration with:
+            - 550k left + 550k right records
+            - Thresholds: 0.9->200k entities, 0.7->100k entities, 0.5->50k entities
+
+        Example:
+            ```python
+            config = GraphConfig.production_1m()
+            edges, total_nodes = generate_hierarchical_graph(config)
+            ```
+        """
+        instance = cls.__new__(cls)
+        instance._config = PyGraphConfig.production_1m()
+        return instance
+
+    @classmethod
+    def production_10m(cls) -> GraphConfig:
+        """Create a large-scale configuration for 10M+ record testing.
+
+        Returns a pre-configured GraphConfig suitable for very large-scale testing
+        with 11M records and hierarchical thresholds.
+
+        Returns:
+            Large-scale configuration with 5.5M left + 5.5M right records
+
+        Example:
+            ```python
+            config = GraphConfig.production_10m()
+            edges, total_nodes = generate_hierarchical_graph(config)
+            ```
+        """
+        instance = cls.__new__(cls)
+        instance._config = PyGraphConfig.production_10m()
+        return instance
+
+    def __repr__(self) -> str:
+        """String representation for debugging."""
+        return repr(self._config)
