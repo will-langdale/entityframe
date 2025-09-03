@@ -2,6 +2,7 @@
 
 import collections
 import logging
+import time
 from typing import Any, TypedDict
 
 import starlings as sl
@@ -9,7 +10,6 @@ import starlings as sl
 logger = logging.getLogger(__name__)
 
 
-# PEP 604 and PEP 585 syntax for modern type hints
 class EntityDict(TypedDict):
     """Entity cluster from pre-merged sources."""
 
@@ -148,17 +148,22 @@ def test_user_eda_workflow():
         0.5: 500,
     }
 
+    # Time graph generation
+    start_time = time.monotonic()
     edges, entities = generate_link_graph(
         n_left=5_500,
         n_right=5_500,
         n_isolates=0,  # Current MVP doesn't support isolates
         thresholds=thresholds,
     )
+    graph_time = time.monotonic() - start_time
 
-    # Load into Starlings
+    # Time collection creation (known bottleneck)
+    start_time = time.monotonic()
     collection = sl.Collection.from_edges(
         list(zip(edges["left"], edges["right"], edges["prob"], strict=True))
     )
+    collection_time = time.monotonic() - start_time
 
     # Test at exact thresholds where edges were created
     prev_components: int = 0
@@ -176,5 +181,10 @@ def test_user_eda_workflow():
 
     edge_count = sum(len(edge_list) for edge_list in edges.values()) // 3
     logger.info(
-        "EDA of %d edges: %s", edge_count, dict(zip(thresholds, counts, strict=False))
+        "EDA workflow: %d edges, %d entities. Graph: %.2fs, Collection: %.2fs. %s",
+        edge_count,
+        len(entities),
+        graph_time,
+        collection_time,
+        dict(zip(thresholds, counts, strict=False)),
     )
