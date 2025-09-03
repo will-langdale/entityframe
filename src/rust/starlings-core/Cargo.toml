@@ -15,8 +15,8 @@ rayon = "1.10"
 comfy-table = "7.1"
 string-interner = "0.17"
 fxhash = "0.2"
-disjoint-sets = "0.4"
 lru = "0.12"
+dashmap = "6.1"
 
 [dev-dependencies]
 criterion = "0.5"

@@ -136,11 +136,11 @@ impl PyCollection {
         let start_time = std::time::Instant::now();
 
         let source_name = source.unwrap_or_else(|| "default".to_string());
-        let mut context = DataContext::new();
+        let context = DataContext::new();
         let mut rust_edges = Vec::with_capacity(edges.len());
 
         // Pre-allocate space for records (estimate 2 unique records per edge on average)
-        context.records.reserve(edges.len());
+        context.reserve(edges.len());
 
         // Efficiently convert all Python keys to Rust edges with optimised batching
         #[cfg(debug_assertions)]

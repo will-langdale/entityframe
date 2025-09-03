@@ -1,11 +1,12 @@
-use disjoint_sets::UnionFind;
 use lru::LruCache;
 use roaring::RoaringBitmap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use super::bitmap_pool::BitmapPool;
 use super::merge_event::MergeEvent;
 use super::partition::PartitionLevel;
+use super::union_find::UnionFind;
 use crate::core::DataContext;
 
 /// Represents a hierarchy of merge events that can generate partitions at any threshold
@@ -28,6 +29,9 @@ pub struct PartitionHierarchy {
     /// Index for binary search on thresholds (using integer keys)
     #[allow(dead_code)]
     threshold_index: BTreeMap<u32, usize>,
+
+    /// Memory pool for efficient RoaringBitmap allocation
+    bitmap_pool: BitmapPool,
 
     /// Configuration
     #[allow(dead_code)]
@@ -81,6 +85,7 @@ impl PartitionHierarchy {
                 merges: Vec::new(),
                 partition_cache: LruCache::new(Self::CACHE_SIZE.try_into().unwrap()),
                 threshold_index: BTreeMap::new(),
+                bitmap_pool: BitmapPool::new(),
                 cache_size: Self::CACHE_SIZE,
             };
         }
@@ -111,17 +116,29 @@ impl PartitionHierarchy {
         // Group edges by threshold (handles quantisation naturally)
         let threshold_groups = Self::group_edges_by_threshold(sorted_edges);
 
-        // Build merge events using union-find
-        let merges = Self::build_merge_events(threshold_groups, num_records);
+        // Create a temporary instance to access bitmap pool during construction
+        let mut temp_hierarchy = Self {
+            context: context.clone(),
+            merges: Vec::new(),
+            partition_cache: LruCache::new(Self::CACHE_SIZE.try_into().unwrap()),
+            threshold_index: BTreeMap::new(),
+            bitmap_pool: BitmapPool::new(),
+            cache_size: Self::CACHE_SIZE,
+        };
+
+        // Build merge events using union-find with bitmap pool
+        let merges = temp_hierarchy.build_merge_events(threshold_groups, num_records);
 
         // Build threshold index for fast lookup
         let threshold_index = Self::build_threshold_index(&merges);
 
+        // Reuse the bitmap pool from temporary instance for efficiency
         Self {
             context,
             merges,
             partition_cache: LruCache::new(Self::CACHE_SIZE.try_into().unwrap()),
             threshold_index,
+            bitmap_pool: temp_hierarchy.bitmap_pool,
             cache_size: Self::CACHE_SIZE,
         }
     }
@@ -156,13 +173,15 @@ impl PartitionHierarchy {
     /// Build merge events from grouped edges using union-find
     ///
     /// Optimised to avoid O(n²) component building by efficiently tracking
-    /// only records that are actually connected by edges.
+    /// only records that are actually connected by edges. Uses bitmap pool
+    /// for efficient RoaringBitmap allocation.
     fn build_merge_events(
+        &mut self,
         threshold_groups: Vec<(f64, Vec<(u32, u32)>)>,
         num_records: usize,
     ) -> Vec<MergeEvent> {
         let mut merges = Vec::new();
-        let mut uf = UnionFind::new(num_records);
+        let uf = UnionFind::new(num_records);
 
         // Track all records that have ever appeared in any edge
         // This allows us to avoid scanning ALL records when building components
@@ -201,9 +220,16 @@ impl PartitionHierarchy {
             for &record in &all_connected_records {
                 let root = uf.find(record);
                 if affected_roots.contains(&root) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = components_before.entry(root) {
+                        // Estimate component size for pool selection
+                        let estimated_size =
+                            all_connected_records.len() / affected_roots.len().max(1);
+                        let (bitmap, _) = self.bitmap_pool.get(estimated_size as u32);
+                        e.insert(bitmap);
+                    }
                     components_before
-                        .entry(root)
-                        .or_default()
+                        .get_mut(&root)
+                        .unwrap()
                         .insert(record as u32);
                 }
             }
@@ -243,6 +269,12 @@ impl PartitionHierarchy {
                     if groups.len() > 1 {
                         merges.push(MergeEvent::new(threshold, groups.clone()));
                     }
+                }
+
+                // Return bitmaps to pool for reuse (use Small size class as default)
+                for (_, bitmap) in components_before {
+                    self.bitmap_pool
+                        .put(bitmap, super::bitmap_pool::PoolSizeClass::Small);
                 }
             }
         }
@@ -317,7 +349,7 @@ impl PartitionHierarchy {
         let num_records = self.context.len();
 
         // Start with all records as singletons
-        let mut uf = UnionFind::new(num_records);
+        let uf = UnionFind::new(num_records);
 
         // Apply all merges with threshold >= requested threshold
         for merge in &self.merges {
@@ -348,9 +380,15 @@ impl PartitionHierarchy {
         // Include ALL records from the context (handles isolates)
         for record_idx in 0..num_records {
             let root = uf.find(record_idx);
+            entities_map.entry(root).or_insert_with(|| {
+                // Estimate entity size for pool selection - use small size as default
+                let estimated_size = (num_records / 100).max(10) as u32; // Reasonable default
+                let (bitmap, _) = self.bitmap_pool.get(estimated_size);
+                bitmap
+            });
             entities_map
-                .entry(root)
-                .or_default()
+                .get_mut(&root)
+                .unwrap()
                 .insert(record_idx as u32);
         }
 
@@ -367,7 +405,7 @@ mod tests {
     use crate::core::{DataContext, Key};
 
     fn create_test_context() -> Arc<DataContext> {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
         ctx.ensure_record("test", Key::String("A".to_string()));
         ctx.ensure_record("test", Key::String("B".to_string()));
         ctx.ensure_record("test", Key::String("C".to_string()));
@@ -410,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_disconnected_components() {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
         // Create 4 records: A, B, C, D
         ctx.ensure_record("test", Key::String("A".to_string()));
         ctx.ensure_record("test", Key::String("B".to_string()));
@@ -441,7 +479,7 @@ mod tests {
 
     #[test]
     fn test_same_threshold_edges_nway_merge() {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
         // Create 4 records: A, B, C, D
         ctx.ensure_record("test", Key::String("A".to_string()));
         ctx.ensure_record("test", Key::String("B".to_string()));
@@ -586,7 +624,7 @@ mod tests {
 
     #[test]
     fn test_isolates_as_singletons() {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
 
         // Create 5 records
         for i in 0..5 {

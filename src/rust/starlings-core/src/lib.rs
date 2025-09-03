@@ -11,7 +11,7 @@ mod tests {
 
     #[test]
     fn test_basic_functionality() {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
 
         let id1 = ctx.ensure_record("test", Key::String("hello".to_string()));
         let id2 = ctx.ensure_record("test", Key::String("world".to_string()));
