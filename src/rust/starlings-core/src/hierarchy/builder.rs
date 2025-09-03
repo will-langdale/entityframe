@@ -94,8 +94,19 @@ impl PartitionHierarchy {
             .map(|(i, j, w)| (i, j, (w * factor).round() / factor))
             .collect();
 
-        // Sort edges by weight (descending) - O(m log m)
-        sorted_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort edges by weight (descending) - O(m log m) with parallel sorting for large datasets
+        use rayon::slice::ParallelSliceMut;
+        if sorted_edges.len() > 10_000 {
+            // Use parallel sorting for large datasets
+            sorted_edges.par_sort_unstable_by(|a, b| {
+                b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else {
+            // Use regular sorting for small datasets to avoid overhead
+            sorted_edges.sort_unstable_by(|a, b| {
+                b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
 
         // Group edges by threshold (handles quantisation naturally)
         let threshold_groups = Self::group_edges_by_threshold(sorted_edges);
@@ -143,6 +154,9 @@ impl PartitionHierarchy {
     }
 
     /// Build merge events from grouped edges using union-find
+    ///
+    /// Optimised to avoid O(n²) component building by efficiently tracking
+    /// only records that are actually connected by edges.
     fn build_merge_events(
         threshold_groups: Vec<(f64, Vec<(u32, u32)>)>,
         num_records: usize,
@@ -150,32 +164,51 @@ impl PartitionHierarchy {
         let mut merges = Vec::new();
         let mut uf = UnionFind::new(num_records);
 
+        // Track all records that have ever appeared in any edge
+        // This allows us to avoid scanning ALL records when building components
+        use rayon::prelude::*;
+        let all_connected_records: HashSet<usize> = if threshold_groups.len() > 100 {
+            // Use parallel collection for large datasets
+            threshold_groups
+                .par_iter()
+                .flat_map(|(_, edges)| {
+                    edges
+                        .par_iter()
+                        .flat_map(|&(src, dst)| [src as usize, dst as usize])
+                })
+                .collect()
+        } else {
+            let mut records = HashSet::new();
+            for (_, edges) in &threshold_groups {
+                for &(src, dst) in edges {
+                    records.insert(src as usize);
+                    records.insert(dst as usize);
+                }
+            }
+            records
+        };
+
         for (threshold, edges_at_threshold) in threshold_groups {
-            // Track components before applying merges
-            let mut components_before: HashMap<usize, RoaringBitmap> = HashMap::new();
-
-            // First pass: collect all current components that will be affected
-            let mut affected_records = HashSet::new();
+            // Collect the components that will be affected by this threshold's edges
+            let mut affected_roots = HashSet::new();
             for &(src, dst) in &edges_at_threshold {
-                affected_records.insert(src);
-                affected_records.insert(dst);
+                affected_roots.insert(uf.find(src as usize));
+                affected_roots.insert(uf.find(dst as usize));
             }
 
-            // Build components before merging
-            for &record in &affected_records {
-                let root = uf.find(record as usize);
-                components_before.entry(root).or_insert_with(|| {
-                    let mut component = RoaringBitmap::new();
-                    for i in 0..num_records {
-                        if uf.find(i) == root {
-                            component.insert(i as u32);
-                        }
-                    }
-                    component
-                });
+            // Build components efficiently - only scan connected records
+            let mut components_before: HashMap<usize, RoaringBitmap> = HashMap::new();
+            for &record in &all_connected_records {
+                let root = uf.find(record);
+                if affected_roots.contains(&root) {
+                    components_before
+                        .entry(root)
+                        .or_default()
+                        .insert(record as u32);
+                }
             }
 
-            // Apply merges to union-find
+            // Apply merges and track which roots were merged
             let mut merged_roots = HashSet::new();
             for &(src, dst) in &edges_at_threshold {
                 let root_src = uf.find(src as usize);
@@ -189,13 +222,13 @@ impl PartitionHierarchy {
             }
 
             // Create merge events for components that were merged
-            if merged_roots.len() > 1 {
-                // Group components by their new root after merging
+            if !merged_roots.is_empty() {
+                // Group old components by their new root after merging
                 let mut merge_groups: HashMap<usize, Vec<RoaringBitmap>> = HashMap::new();
 
                 for old_root in merged_roots {
                     if let Some(component) = components_before.get(&old_root) {
-                        // Find what this component's new root is
+                        // Find what this component's new root is after merging
                         let first_record = component.iter().next().unwrap() as usize;
                         let new_root = uf.find(first_record);
                         merge_groups

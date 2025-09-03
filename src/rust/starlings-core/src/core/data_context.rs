@@ -28,19 +28,21 @@ impl DataContext {
 
         let record = InternedRecord::new(source_id, key);
 
-        if let Some(&existing_id) = self.identity_map.get(&record) {
-            existing_id
-        } else {
-            let record_id = self.records.len() as u32;
-            self.records.push(record.clone());
-            self.identity_map.insert(record, record_id);
+        // Use entry API for more efficient insertion
+        match self.identity_map.entry(record.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let record_id = self.records.len() as u32;
+                self.records.push(record);
+                entry.insert(record_id);
 
-            self.source_index
-                .entry(source_id)
-                .or_default()
-                .insert(record_id);
+                self.source_index
+                    .entry(source_id)
+                    .or_default()
+                    .insert(record_id);
 
-            record_id
+                record_id
+            }
         }
     }
 

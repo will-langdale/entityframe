@@ -140,19 +140,19 @@ def generate_link_graph(
 
 
 def test_user_eda_workflow():
-    """Simple EDA workflow: load 10k edges and explore thresholds."""
-    # Generate ~10k edges with realistic structure
+    """Production-scale EDA workflow: Million-record minimum scale for library."""
+    # Million-scale is the MINIMUM expected dataset size for production use
     thresholds = {
-        0.9: 2_000,
-        0.7: 1_000,
-        0.5: 500,
+        0.9: 200_000,  # 200k entities at high precision
+        0.7: 100_000,  # 100k entities at medium precision
+        0.5: 50_000,  # 50k entities at lower precision
     }
 
     # Time graph generation
     start_time = time.monotonic()
     edges, entities = generate_link_graph(
-        n_left=5_500,
-        n_right=5_500,
+        n_left=550_000,  # 550k left-side records (customers, etc.)
+        n_right=550_000,  # 550k right-side records (transactions, etc.)
         n_isolates=0,  # Current MVP doesn't support isolates
         thresholds=thresholds,
     )

@@ -132,14 +132,27 @@ impl PyCollection {
         source: Option<String>,
         py: Python,
     ) -> PyResult<Self> {
+        #[cfg(debug_assertions)]
+        let start_time = std::time::Instant::now();
+
         let source_name = source.unwrap_or_else(|| "default".to_string());
         let mut context = DataContext::new();
-        let mut rust_edges = Vec::new();
+        let mut rust_edges = Vec::with_capacity(edges.len());
+
+        // Pre-allocate space for records (estimate 2 unique records per edge on average)
+        context.records.reserve(edges.len());
+
+        // Efficiently convert all Python keys to Rust edges with optimised batching
+        #[cfg(debug_assertions)]
+        let conversion_start = std::time::Instant::now();
+
+        // Pre-size the vectors for better performance
+        rust_edges.reserve(edges.len());
 
         for (key1_obj, key2_obj, threshold) in edges {
-            // Convert Python objects to Rust Keys
-            let key1 = python_obj_to_key(key1_obj, py)?;
-            let key2 = python_obj_to_key(key2_obj, py)?;
+            // Convert Python objects to Rust Keys (optimised for common cases)
+            let key1 = python_obj_to_key_fast(key1_obj, py)?;
+            let key2 = python_obj_to_key_fast(key2_obj, py)?;
 
             // Ensure records exist in context
             let id1 = context.ensure_record(&source_name, key1);
@@ -147,8 +160,46 @@ impl PyCollection {
 
             rust_edges.push((id1, id2, threshold));
         }
+        #[cfg(debug_assertions)]
+        let conversion_time = conversion_start.elapsed();
 
+        #[cfg(debug_assertions)]
+        let hierarchy_start = std::time::Instant::now();
+        #[cfg(debug_assertions)]
+        let edge_count = rust_edges.len();
+        #[cfg(debug_assertions)]
+        let record_count = context.len();
         let hierarchy = PartitionHierarchy::from_edges(rust_edges, Arc::new(context), 6);
+        #[cfg(debug_assertions)]
+        let hierarchy_time = hierarchy_start.elapsed();
+
+        #[cfg(debug_assertions)]
+        let total_time = start_time.elapsed();
+
+        // Production-scale performance metrics (debug builds and large datasets only)
+        #[cfg(debug_assertions)]
+        if edge_count >= 1_000_000 {
+            eprintln!("🏭 Production-scale Collection.from_edges performance:");
+            eprintln!(
+                "   📊 Scale: {} edges, {} records",
+                edge_count, record_count
+            );
+            eprintln!("   ⚡ Python->Rust conversion: {:?}", conversion_time);
+            eprintln!("   🏗️  Hierarchy construction: {:?}", hierarchy_time);
+            eprintln!("   📈 Total time: {:?}", total_time);
+            eprintln!(
+                "   🎯 Edges per second: {:.0}",
+                edge_count as f64 / total_time.as_secs_f64()
+            );
+            eprintln!(
+                "   🏆 Target <10s: {}",
+                if total_time.as_secs_f64() < 10.0 {
+                    "✅ ACHIEVED"
+                } else {
+                    "❌ MISSED"
+                }
+            );
+        }
 
         Ok(PyCollection { hierarchy })
     }
@@ -194,14 +245,10 @@ impl PyCollection {
     }
 }
 
-/// Convert Python object to Rust Key
-fn python_obj_to_key(obj: Py<PyAny>, py: Python) -> PyResult<Key> {
-    // Try different Python types
-    if let Ok(s) = obj.downcast_bound::<PyString>(py) {
-        Ok(Key::String(s.to_string()))
-    } else if let Ok(b) = obj.downcast_bound::<PyBytes>(py) {
-        Ok(Key::Bytes(b.as_bytes().to_vec()))
-    } else if let Ok(i) = obj.extract::<i64>(py) {
+/// Convert Python object to Rust Key (optimised for performance)
+fn python_obj_to_key_fast(obj: Py<PyAny>, py: Python) -> PyResult<Key> {
+    // Try integer types first (most common in large datasets)
+    if let Ok(i) = obj.extract::<i64>(py) {
         if i < 0 {
             Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Integer key must be non-negative and fit in u64",
@@ -211,6 +258,10 @@ fn python_obj_to_key(obj: Py<PyAny>, py: Python) -> PyResult<Key> {
         } else {
             Ok(Key::U64(i as u64))
         }
+    } else if let Ok(s) = obj.downcast_bound::<PyString>(py) {
+        Ok(Key::String(s.to_string()))
+    } else if let Ok(b) = obj.downcast_bound::<PyBytes>(py) {
+        Ok(Key::Bytes(b.as_bytes().to_vec()))
     } else {
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "Key must be str, bytes, or int",
