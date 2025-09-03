@@ -1,8 +1,4 @@
-//! Test utilities for generating realistic entity resolution graph patterns.
-//!
-//! This module provides graph generation functions that mirror production entity resolution
-//! patterns, including hierarchical threshold structures and realistic component distributions.
-//! These patterns are used consistently across both Rust benchmarks and Python tests.
+//! Test utilities for generating entity resolution graph patterns.
 
 use crate::core::{DataContext, Key};
 use std::collections::HashMap;
@@ -10,22 +6,16 @@ use std::collections::HashMap;
 /// Entity cluster configuration for hierarchical graph generation.
 #[derive(Debug, Clone)]
 pub struct ThresholdConfig {
-    /// Similarity threshold (0.0 to 1.0)
     pub threshold: f64,
-    /// Target number of entities at this threshold
     pub target_entities: usize,
 }
 
-/// Configuration for generating realistic entity resolution graphs.
+/// Configuration for generating entity resolution graphs.
 #[derive(Debug, Clone)]
 pub struct GraphConfig {
-    /// Number of left-side records (e.g., customers)
     pub n_left: usize,
-    /// Number of right-side records (e.g., transactions)  
     pub n_right: usize,
-    /// Number of isolated records (no edges)
     pub n_isolates: usize,
-    /// Hierarchical threshold configuration (threshold -> target entities)
     pub thresholds: Vec<ThresholdConfig>,
 }
 
@@ -88,22 +78,6 @@ pub struct GraphData {
 }
 
 /// Generate a hierarchical bipartite graph with exact component counts.
-///
-/// This function mirrors the Python `generate_link_graph` function, creating
-/// realistic entity resolution patterns with hierarchical threshold structures.
-/// Uses the same block-based construction method to ensure exact component counts.
-///
-/// # Arguments
-/// * `config` - Graph generation configuration
-///
-/// # Returns
-/// * `GraphData` - Generated edges, context, and metadata
-///
-/// # Algorithm
-/// 1. Partition nodes into hierarchical blocks for each threshold level
-/// 2. Create intra-block edges at the finest threshold level
-/// 3. Create inter-block linking edges for coarser levels
-/// 4. Generate realistic record keys across multiple source types
 pub fn generate_hierarchical_graph(config: GraphConfig) -> GraphData {
     let total_nodes = config.n_left + config.n_right;
     let active_n_left = config.n_left;

@@ -9,31 +9,15 @@ use super::partition::PartitionLevel;
 use super::union_find::UnionFind;
 use crate::core::DataContext;
 
-/// Represents a hierarchy of merge events that can generate partitions at any threshold
-///
-/// The hierarchy is built from edges using a union-find algorithm and stores merge events
-/// in descending threshold order. It maintains an LRU cache for frequently accessed
-/// partitions and supports fixed-point threshold conversion for exact comparisons.
+/// Hierarchy of merge events that can generate partitions at any threshold
 #[derive(Debug, Clone)]
 pub struct PartitionHierarchy {
-    /// Reference to the data context that gives meaning to record indices
     context: Arc<DataContext>,
-
-    /// Primary: Merge events sorted by threshold (descending)
     merges: Vec<MergeEvent>,
-
-    /// Secondary: Cache for frequently accessed partitions
-    /// Using u32 keys (threshold * 1_000_000) for exact comparison
     partition_cache: LruCache<u32, PartitionLevel>,
-
-    /// Index for binary search on thresholds (using integer keys)
     #[allow(dead_code)]
     threshold_index: BTreeMap<u32, usize>,
-
-    /// Memory pool for efficient RoaringBitmap allocation
     bitmap_pool: BitmapPool,
-
-    /// Configuration
     #[allow(dead_code)]
     cache_size: usize,
 }
@@ -56,17 +40,6 @@ impl PartitionHierarchy {
     }
 
     /// Build a hierarchy from edges using union-find algorithm
-    ///
-    /// # Arguments
-    /// * `edges` - Vector of (src, dst, weight) tuples with u32 record indices
-    /// * `context` - Shared data context that gives meaning to record indices
-    /// * `quantise` - Number of decimal places to quantise thresholds (1-6)
-    ///
-    /// # Returns
-    /// A new PartitionHierarchy with merge events sorted by threshold (descending)
-    ///
-    /// # Complexity
-    /// O(m log m) where m = number of edges (dominated by sorting)
     pub fn from_edges(
         edges: Vec<(u32, u32, f64)>,
         context: Arc<DataContext>,
@@ -161,33 +134,16 @@ impl PartitionHierarchy {
     }
 
     /// Build merge events from grouped edges using union-find
-    ///
-    /// Optimized with incremental component tracking - maintains component state across thresholds
-    /// instead of rebuilding from scratch, achieving O(edges + merges) vs O(records × thresholds).
     fn build_merge_events(
         &mut self,
         threshold_groups: Vec<(f64, Vec<(u32, u32)>)>,
         num_records: usize,
     ) -> Vec<MergeEvent> {
-        #[cfg(debug_assertions)]
-        let total_start = std::time::Instant::now();
-
         let mut merges = Vec::new();
-        let uf = UnionFind::new(num_records);
-
-        // INCREMENTAL OPTIMIZATION: Maintain component state across thresholds
-        // This HashMap tracks components as they evolve, avoiding O(n) rebuilds per threshold
+        let mut uf = UnionFind::new(num_records);
         let mut active_components: HashMap<usize, RoaringBitmap> = HashMap::new();
 
         for (threshold, edges_at_threshold) in threshold_groups.iter() {
-            #[cfg(debug_assertions)]
-            let _threshold_start = std::time::Instant::now();
-
-            #[cfg(debug_assertions)]
-            let component_start = std::time::Instant::now();
-
-            // INCREMENTAL APPROACH: Only process edges that will actually merge components
-            // Use optimized pair tracking with pre-sorted keys to avoid redundant computation
             let mut processed_pairs = HashSet::new();
 
             for &(src, dst) in edges_at_threshold {
@@ -195,7 +151,6 @@ impl PartitionHierarchy {
                 let root_dst = uf.find(dst as usize);
 
                 if root_src != root_dst {
-                    // Pre-sort pair to avoid redundant min/max calls
                     let pair = if root_src < root_dst {
                         (root_src, root_dst)
                     } else {
@@ -205,36 +160,28 @@ impl PartitionHierarchy {
                     if !processed_pairs.contains(&pair) {
                         processed_pairs.insert(pair);
 
-                        // Lazy creation: only create components when they're about to merge
                         let mut merging_components = Vec::new();
 
-                        // Get or create component for src (may be singleton)
                         if let Some(component_src) = active_components.remove(&root_src) {
                             merging_components.push(component_src);
                         } else {
-                            // Create singleton component for src
                             let (mut bitmap, _) = self.bitmap_pool.get(1);
                             bitmap.insert(src);
                             merging_components.push(bitmap);
                         }
 
-                        // Get or create component for dst (may be singleton)
                         if let Some(component_dst) = active_components.remove(&root_dst) {
                             merging_components.push(component_dst);
                         } else {
-                            // Create singleton component for dst
                             let (mut bitmap, _) = self.bitmap_pool.get(1);
                             bitmap.insert(dst);
                             merging_components.push(bitmap);
                         }
 
-                        // Apply the union-find merge
                         uf.union(src as usize, dst as usize);
                         let new_root = uf.find(src as usize);
 
-                        // Create merge event immediately (no clones, move semantics)
                         if merging_components.len() > 1 {
-                            // Create merged component for active tracking
                             let (mut merged_component, _) =
                                 self.bitmap_pool
                                     .get(merging_components.iter().map(|b| b.len()).sum::<u64>()
@@ -243,31 +190,17 @@ impl PartitionHierarchy {
                                 merged_component |= old_component;
                             }
 
-                            // Move components to merge event (no clone!)
                             merges.push(MergeEvent::new(*threshold, merging_components));
-
-                            // Store merged component under new root
                             active_components.insert(new_root, merged_component);
                         }
                     }
                 }
             }
-
-            #[cfg(debug_assertions)]
-            let _component_time = component_start.elapsed();
         }
 
-        // Clean up: return any remaining active components to the pool
         for (_, bitmap) in active_components {
             self.bitmap_pool
                 .put(bitmap, super::bitmap_pool::PoolSizeClass::Small);
-        }
-
-        #[cfg(debug_assertions)]
-        {
-            let elapsed = total_start.elapsed().as_secs_f64();
-            eprintln!("⚡ Incremental hierarchy construction: {:.2}s for {} threshold groups, {} merge events", 
-                elapsed, threshold_groups.len(), merges.len());
         }
 
         merges
@@ -293,19 +226,6 @@ impl PartitionHierarchy {
     }
 
     /// Get a partition at a specific threshold
-    ///
-    /// Returns a reference to the partition at the given threshold. Partitions are cached
-    /// using an LRU cache for efficient repeated access. The first access to a threshold
-    /// requires O(m) reconstruction, but subsequent accesses are O(1) from cache.
-    ///
-    /// # Arguments
-    /// * `threshold` - The threshold value between 0.0 and 1.0
-    ///
-    /// # Returns
-    /// A reference to the PartitionLevel at the specified threshold
-    ///
-    /// # Panics
-    /// Panics if threshold is not between 0.0 and 1.0
     pub fn at_threshold(&mut self, threshold: f64) -> &PartitionLevel {
         // Validate threshold
         assert!(
@@ -330,17 +250,11 @@ impl PartitionHierarchy {
     }
 
     /// Reconstruct a partition at a specific threshold
-    ///
-    /// This method rebuilds the partition from scratch by applying all merge events
-    /// with threshold >= the requested threshold.
-    ///
-    /// # Complexity
-    /// O(m + n) where m = number of merge events and n = number of records
     fn reconstruct_at_threshold(&self, threshold: f64) -> PartitionLevel {
         let num_records = self.context.len();
 
         // Start with all records as singletons
-        let uf = UnionFind::new(num_records);
+        let mut uf = UnionFind::new(num_records);
 
         // Apply all merges with threshold >= requested threshold
         for merge in &self.merges {

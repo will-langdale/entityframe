@@ -4,18 +4,10 @@ use starlings_core::hierarchy::PartitionHierarchy;
 use std::sync::Arc;
 
 fn generate_test_hierarchy(num_edges: usize) -> PartitionHierarchy {
-    println!(
-        "Generating {}M edge hierarchy for partition reconstruction testing...",
-        num_edges as f64 / 1_000_000.0
-    );
-
     let ctx = DataContext::new();
     let mut edges = Vec::with_capacity(num_edges);
-
-    // Realistic node-to-edge ratio for entity resolution (1:3 ratio)
     let num_nodes = (num_edges as f64 / 3.0).ceil() as usize;
 
-    // Add realistic nodes with mixed key types
     for i in 0..num_nodes {
         match i % 4 {
             0 => ctx.ensure_record("customers", Key::String(format!("cust_{}", i))),
@@ -28,7 +20,6 @@ fn generate_test_hierarchy(num_edges: usize) -> PartitionHierarchy {
 
     let ctx = Arc::new(ctx);
 
-    // Generate realistic edge weight distribution for entity resolution
     use std::collections::HashSet;
     let mut used_edges = HashSet::new();
 
@@ -40,11 +31,10 @@ fn generate_test_hierarchy(num_edges: usize) -> PartitionHierarchy {
             if src != dst && !used_edges.contains(&(src.min(dst), src.max(dst))) {
                 used_edges.insert((src.min(dst), src.max(dst)));
 
-                // Realistic weight distribution: high confidence clusters, medium links, noise
                 let weight = match i * 10 / num_edges {
-                    0..=2 => 0.8 + fastrand::f64() * 0.2, // 30% high confidence
-                    3..=7 => 0.5 + fastrand::f64() * 0.3, // 50% medium confidence
-                    _ => 0.1 + fastrand::f64() * 0.4,     // 20% noise
+                    0..=2 => 0.8 + fastrand::f64() * 0.2,
+                    3..=7 => 0.5 + fastrand::f64() * 0.3,
+                    _ => 0.1 + fastrand::f64() * 0.4,
                 };
 
                 edges.push((src, dst, weight));
