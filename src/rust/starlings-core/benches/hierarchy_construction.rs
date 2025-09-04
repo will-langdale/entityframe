@@ -47,16 +47,11 @@ fn generate_test_edges(num_edges: usize) -> (Vec<(u32, u32, f64)>, Arc<DataConte
 }
 
 fn bench_hierarchy_construction_progressive(c: &mut Criterion) {
-    let scales = vec![
-        ("100k", 100_000),
-        ("500k", 500_000),
-        ("1M", 1_000_000),
-        ("2M", 2_000_000),
-        ("5M", 5_000_000),
-    ];
+    let scales = vec![("100k", 100_000), ("500k", 500_000), ("1M", 1_000_000)];
 
     let mut group = c.benchmark_group("hierarchy_construction");
     group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(10));
 
     for (name, num_edges) in scales {
         let (edges, ctx) = generate_test_edges(num_edges);

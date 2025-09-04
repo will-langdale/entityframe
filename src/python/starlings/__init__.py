@@ -40,17 +40,29 @@ Example:
 
 from __future__ import annotations
 
+import logging
+import os
+import time
 from importlib.metadata import version  # noqa: PLC0415
 from typing import Any, cast
 
+from .debug import DebugTimer, get_memory_mb
 from .starlings import Collection as PyCollection
 from .starlings import GraphConfig as PyGraphConfig
 from .starlings import Partition as PyPartition
 from .starlings import generate_hierarchical_graph as _generate_hierarchical_graph
 
+logger = logging.getLogger(__name__)
+
+# Load debug flag once at module import time
+_DEBUG_ENABLED = os.getenv("STARLINGS_DEBUG", "").lower() in ("1", "true", "on")
+
 
 def generate_hierarchical_graph(
-    config: GraphConfig,
+    n_left: int,
+    n_right: int,
+    n_isolates: int,
+    thresholds: list[tuple[float, int]],
 ) -> tuple[list[tuple[int, int, float]], int]:
     """Generate a hierarchical graph with realistic entity resolution patterns.
 
@@ -59,7 +71,10 @@ def generate_hierarchical_graph(
     distributions that mirror production entity resolution patterns.
 
     Args:
-        config: GraphConfig specifying graph structure and thresholds
+        n_left: Number of left-side records (e.g., customers)
+        n_right: Number of right-side records (e.g., transactions)
+        n_isolates: Number of isolated records (no edges)
+        thresholds: List of (threshold, target_entities) pairs
 
     Returns:
         Tuple of (edges, total_nodes) where:
@@ -71,15 +86,58 @@ def generate_hierarchical_graph(
 
     Example:
         ```python
-        config = GraphConfig.production_1m()
-        edges, total_nodes = generate_hierarchical_graph(config)
+        # Custom graph generation
+        edges, total_nodes = generate_hierarchical_graph(
+            n_left=1000, n_right=1000, n_isolates=0, thresholds=[(0.9, 500), (0.7, 300)]
+        )
 
         collection = Collection.from_edges(edges)
         partition = collection.at(0.9)
         print(f"Entities at 0.9: {len(partition.entities)}")
         ```
     """
-    result = _generate_hierarchical_graph(config._config)
+    config = PyGraphConfig(n_left, n_right, n_isolates, thresholds)
+    result = _generate_hierarchical_graph(config)
+    return result  # type: ignore[no-any-return]
+
+
+def generate_production_1m_graph() -> tuple[list[tuple[int, int, float]], int]:
+    """Generate a production-scale 1M record graph with hierarchical thresholds.
+
+    Convenience function that creates a realistic production-scale dataset
+    with 1.1M records and multiple threshold levels.
+
+    Returns:
+        Tuple of (edges, total_nodes) with production-scale data
+
+    Example:
+        ```python
+        edges, total_nodes = generate_production_1m_graph()
+        collection = Collection.from_edges(edges)
+        ```
+    """
+    config = PyGraphConfig.production_1m()
+    result = _generate_hierarchical_graph(config)
+    return result  # type: ignore[no-any-return]
+
+
+def generate_production_10m_graph() -> tuple[list[tuple[int, int, float]], int]:
+    """Generate a large-scale 10M record graph with hierarchical thresholds.
+
+    Convenience function that creates a very large production-scale dataset
+    with 11M records and multiple threshold levels.
+
+    Returns:
+        Tuple of (edges, total_nodes) with large-scale data
+
+    Example:
+        ```python
+        edges, total_nodes = generate_production_10m_graph()
+        collection = Collection.from_edges(edges)
+        ```
+    """
+    config = PyGraphConfig.production_10m()
+    result = _generate_hierarchical_graph(config)
     return result  # type: ignore[no-any-return]
 
 
@@ -232,7 +290,33 @@ class Collection:
             print(f"Entities: {len(partition.entities)}")
             ```
         """
-        rust_collection = PyCollection.from_edges(edges, source=source)
+        start_time = time.perf_counter() if _DEBUG_ENABLED else 0.0
+        start_memory = get_memory_mb() if _DEBUG_ENABLED else 0.0
+
+        if _DEBUG_ENABLED:
+            logger.debug(
+                "Starting with %s edges, memory: %.1fMB",
+                f"{len(edges):,}",
+                start_memory,
+            )
+
+        with DebugTimer("Edge validation & preprocessing", _DEBUG_ENABLED):
+            # Let Rust handle the actual processing, but we can measure overall time
+            pass
+
+        with DebugTimer("Hierarchy construction & partitioning", _DEBUG_ENABLED):
+            rust_collection = PyCollection.from_edges(edges, source=source)
+
+        if _DEBUG_ENABLED:
+            total_time = time.perf_counter() - start_time
+            final_memory = get_memory_mb()
+            peak_delta = final_memory - start_memory
+            logger.debug(
+                "Total: %.3fs, %+.1fMB peak memory",
+                total_time,
+                peak_delta,
+            )
+
         return cls(rust_collection)
 
     def at(self, threshold: float) -> Partition:

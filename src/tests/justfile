@@ -7,7 +7,7 @@ default: python rust
 # Run Python tests
 python:
     @echo "Running Python tests..."
-    uv run pytest
+    STARLINGS_DEBUG=1 uv run pytest
 
 # Run only Rust tests
 rust:
@@ -17,4 +17,4 @@ rust:
 # Internal benchmark runner
 _bench:
     @echo "Running Rust core benchmarks..."
-    cargo bench -p starlings-core
+    STARLINGS_DEBUG=1 cargo bench -p starlings-core

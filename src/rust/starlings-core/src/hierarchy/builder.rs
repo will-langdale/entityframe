@@ -69,14 +69,26 @@ impl PartitionHierarchy {
         let num_edges = edges.len();
 
         // Apply quantisation to weights
+        #[cfg(debug_assertions)]
+        let quantise_start = std::time::Instant::now();
+
         let factor = 10_f64.powi(quantise as i32);
         let mut quantised_edges: Vec<_> = edges
             .into_iter()
             .map(|(i, j, w)| (i, j, (w * factor).round() / factor))
             .collect();
 
+        #[cfg(debug_assertions)]
+        let quantise_time = quantise_start.elapsed();
+
         // Sort edges by threshold (highest first)
+        #[cfg(debug_assertions)]
+        let sort_start = std::time::Instant::now();
+
         quantised_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        #[cfg(debug_assertions)]
+        let sort_time = sort_start.elapsed();
 
         // Create a temporary instance with scaled bitmap pool for construction
         let mut temp_hierarchy = Self {
@@ -89,21 +101,50 @@ impl PartitionHierarchy {
         };
 
         // Group edges by threshold and build merge events
+        #[cfg(debug_assertions)]
+        let group_start = std::time::Instant::now();
+
         let threshold_groups = Self::group_edges_by_threshold(quantised_edges);
+
+        #[cfg(debug_assertions)]
+        let group_time = group_start.elapsed();
+
+        #[cfg(debug_assertions)]
+        let union_find_start = std::time::Instant::now();
+
         let merges = temp_hierarchy.build_merge_events(threshold_groups, num_records);
+
+        #[cfg(debug_assertions)]
+        let union_find_time = union_find_start.elapsed();
 
         // Build threshold index for fast lookup
         let threshold_index = Self::build_threshold_index(&merges);
 
         // Reuse the bitmap pool from temporary instance for efficiency
-        Self {
+        let result = Self {
             context,
             merges,
             partition_cache: LruCache::new(Self::CACHE_SIZE.try_into().unwrap()),
             threshold_index,
             bitmap_pool: temp_hierarchy.bitmap_pool,
             cache_size: Self::CACHE_SIZE,
+        };
+
+        // Debug output for hierarchy construction breakdown
+        #[cfg(debug_assertions)]
+        if num_edges >= 100_000 {
+            eprintln!("   🔧 Hierarchy construction breakdown:");
+            eprintln!("      Quantisation: {:?}", quantise_time);
+            eprintln!("      Sorting {} edges: {:?}", num_edges, sort_time);
+            eprintln!("      Edge grouping: {:?}", group_time);
+            eprintln!("      Union-find & merges: {:?}", union_find_time);
+            eprintln!(
+                "      Total hierarchy: {:?}",
+                quantise_time + sort_time + group_time + union_find_time
+            );
         }
+
+        result
     }
 
     /// Group consecutive edges with the same threshold
@@ -143,6 +184,11 @@ impl PartitionHierarchy {
         let mut uf = UnionFind::new(num_records);
         let mut active_components: HashMap<usize, RoaringBitmap> = HashMap::new();
 
+        #[cfg(debug_assertions)]
+        let mut merge_count = 0;
+        #[cfg(debug_assertions)]
+        let mut bitmap_allocations = 0;
+
         for (threshold, edges_at_threshold) in threshold_groups.iter() {
             let mut processed_pairs = HashSet::new();
 
@@ -168,6 +214,10 @@ impl PartitionHierarchy {
                             let (mut bitmap, _) = self.bitmap_pool.get(1);
                             bitmap.insert(src);
                             merging_components.push(bitmap);
+                            #[cfg(debug_assertions)]
+                            {
+                                bitmap_allocations += 1;
+                            }
                         }
 
                         if let Some(component_dst) = active_components.remove(&root_dst) {
@@ -176,6 +226,10 @@ impl PartitionHierarchy {
                             let (mut bitmap, _) = self.bitmap_pool.get(1);
                             bitmap.insert(dst);
                             merging_components.push(bitmap);
+                            #[cfg(debug_assertions)]
+                            {
+                                bitmap_allocations += 1;
+                            }
                         }
 
                         uf.union(src as usize, dst as usize);
@@ -192,6 +246,10 @@ impl PartitionHierarchy {
 
                             merges.push(MergeEvent::new(*threshold, merging_components));
                             active_components.insert(new_root, merged_component);
+                            #[cfg(debug_assertions)]
+                            {
+                                merge_count += 1;
+                            }
                         }
                     }
                 }
@@ -201,6 +259,17 @@ impl PartitionHierarchy {
         for (_, bitmap) in active_components {
             self.bitmap_pool
                 .put(bitmap, super::bitmap_pool::PoolSizeClass::Small);
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let total_edges: usize = threshold_groups.iter().map(|(_, edges)| edges.len()).sum();
+            if total_edges >= 100_000 {
+                eprintln!(
+                    "      Union-find stats: {} merges, {} bitmap allocations",
+                    merge_count, bitmap_allocations
+                );
+            }
         }
 
         merges

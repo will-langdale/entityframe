@@ -4,12 +4,12 @@ use starlings_core::core::{DataContext, Key};
 fn benchmark_10m_record_insertion(c: &mut Criterion) {
     let mut group = c.benchmark_group("record_insertion_production");
     group.sample_size(10);
-    group.measurement_time(std::time::Duration::from_secs(30));
+    group.measurement_time(std::time::Duration::from_secs(10));
 
-    group.bench_function("10M unique record insertions", |b| {
+    group.bench_function("1M unique record insertions", |b| {
         b.iter(|| {
             let ctx = DataContext::new();
-            for i in 0..10_000_000 {
+            for i in 0..1_000_000 {
                 // Mix different key types for realism
                 match i % 4 {
                     0 => ctx

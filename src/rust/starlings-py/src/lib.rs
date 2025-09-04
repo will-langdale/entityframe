@@ -105,6 +105,9 @@ impl PyCollection {
         let conversion_start = std::time::Instant::now();
 
         // Phase 1: Bulk Python object extraction with deduplication
+        #[cfg(debug_assertions)]
+        let phase1_start = std::time::Instant::now();
+
         let mut key_to_id: HashMap<Key, u32> = HashMap::new();
         let mut extracted_edges = Vec::with_capacity(edges.len());
 
@@ -120,7 +123,13 @@ impl PyCollection {
             extracted_edges.push((key1, key2, threshold));
         }
 
+        #[cfg(debug_assertions)]
+        let phase1_time = phase1_start.elapsed();
+
         // Phase 2: Batch key registration with deduplication
+        #[cfg(debug_assertions)]
+        let phase2_start = std::time::Instant::now();
+
         for (key1, key2, _) in &extracted_edges {
             if !key_to_id.contains_key(key1) {
                 let id = context.ensure_record(&source_name, key1.clone());
@@ -132,12 +141,22 @@ impl PyCollection {
             }
         }
 
+        #[cfg(debug_assertions)]
+        let phase2_time = phase2_start.elapsed();
+
         // Phase 3: Build final edge list with ID lookups
+        #[cfg(debug_assertions)]
+        let phase3_start = std::time::Instant::now();
+
         for (key1, key2, threshold) in extracted_edges {
             let id1 = key_to_id[&key1];
             let id2 = key_to_id[&key2];
             rust_edges.push((id1, id2, threshold));
         }
+
+        #[cfg(debug_assertions)]
+        let phase3_time = phase3_start.elapsed();
+
         #[cfg(debug_assertions)]
         let conversion_time = conversion_start.elapsed();
 
@@ -156,13 +175,17 @@ impl PyCollection {
 
         // Production-scale performance metrics (debug builds and large datasets only)
         #[cfg(debug_assertions)]
-        if edge_count >= 1_000_000 {
+        if edge_count >= 100_000 {
             eprintln!("🏭 Production-scale Collection.from_edges performance:");
             eprintln!(
-                "   📊 Scale: {} edges, {} records",
+                "   📊 Scale: {} edges, {} unique records",
                 edge_count, record_count
             );
-            eprintln!("   ⚡ Python->Rust conversion: {:?}", conversion_time);
+            eprintln!("   ⚡ Python->Rust conversion breakdown:");
+            eprintln!("      Phase 1 (Python extraction): {:?}", phase1_time);
+            eprintln!("      Phase 2 (Key interning): {:?}", phase2_time);
+            eprintln!("      Phase 3 (ID mapping): {:?}", phase3_time);
+            eprintln!("      Total conversion: {:?}", conversion_time);
             eprintln!("   🏗️  Hierarchy construction: {:?}", hierarchy_time);
             eprintln!("   📈 Total time: {:?}", total_time);
             eprintln!(
@@ -170,13 +193,20 @@ impl PyCollection {
                 edge_count as f64 / total_time.as_secs_f64()
             );
             eprintln!(
-                "   🏆 Target <10s: {}",
-                if total_time.as_secs_f64() < 10.0 {
-                    "✅ ACHIEVED"
-                } else {
-                    "❌ MISSED"
-                }
+                "   📍 Time breakdown: {:.1}% conversion, {:.1}% hierarchy",
+                (conversion_time.as_secs_f64() / total_time.as_secs_f64()) * 100.0,
+                (hierarchy_time.as_secs_f64() / total_time.as_secs_f64()) * 100.0
             );
+            if edge_count >= 1_000_000 {
+                eprintln!(
+                    "   🏆 1M edges <10s target: {}",
+                    if total_time.as_secs_f64() < 10.0 {
+                        "✅ ACHIEVED"
+                    } else {
+                        "❌ MISSED"
+                    }
+                );
+            }
         }
 
         Ok(PyCollection { hierarchy })

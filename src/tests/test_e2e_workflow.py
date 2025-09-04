@@ -11,11 +11,10 @@ logger = logging.getLogger(__name__)
 def test_user_eda_workflow():
     """Production-scale EDA workflow: Million-record minimum scale for library."""
     # Million-scale is the MINIMUM expected dataset size for production use
-    config = sl.GraphConfig.production_1m()
 
     # Time graph generation using Rust implementation
     start_time = time.monotonic()
-    edges, total_nodes = sl.generate_hierarchical_graph(config)
+    edges, total_nodes = sl.generate_production_1m_graph()
     graph_time = time.monotonic() - start_time
 
     # Time collection creation (optimised Python->Rust boundary)

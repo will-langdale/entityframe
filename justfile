@@ -13,7 +13,7 @@ build:
 format:
     uvx ruff check src/ --fix
     uvx ruff format src/
-    uvx mypy src/python/
+    uvx --with pip mypy src/python/ --install-types --non-interactive
     cargo fmt
     cargo clippy
 

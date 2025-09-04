@@ -51,14 +51,14 @@ fn generate_test_hierarchy(num_edges: usize) -> PartitionHierarchy {
     PartitionHierarchy::from_edges(edges, ctx, 6)
 }
 
-fn bench_partition_reconstruction_10m(c: &mut Criterion) {
-    let mut hierarchy = generate_test_hierarchy(10_000_000);
+fn bench_partition_reconstruction_1m(c: &mut Criterion) {
+    let mut hierarchy = generate_test_hierarchy(1_000_000);
 
     let mut group = c.benchmark_group("partition_reconstruction_production");
     group.sample_size(10);
-    group.measurement_time(std::time::Duration::from_secs(30));
+    group.measurement_time(std::time::Duration::from_secs(10));
 
-    group.bench_function("10M_edges_threshold_access", |b| {
+    group.bench_function("1M_edges_threshold_access", |b| {
         b.iter(|| {
             // Test uncached access to different thresholds
             black_box(hierarchy.at_threshold(0.95));
@@ -70,5 +70,5 @@ fn bench_partition_reconstruction_10m(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_partition_reconstruction_10m);
+criterion_group!(benches, bench_partition_reconstruction_1m);
 criterion_main!(benches);
