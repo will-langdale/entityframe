@@ -749,7 +749,7 @@ mod tests {
 
         let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
 
-        // Test hierarchical behavior
+        // Test hierarchical behaviour
         let partition_high = hierarchy.at_threshold(0.95);
         assert_eq!(
             partition_high.entities().len(),

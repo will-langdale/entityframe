@@ -1,6 +1,5 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyType};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use starlings_core::test_utils::{GraphConfig, ThresholdConfig};
@@ -97,8 +96,10 @@ impl PyCollection {
         let start_time = std::time::Instant::now();
 
         let source_name = source.unwrap_or_else(|| "default".to_string());
-        let context = DataContext::new();
-        let mut rust_edges = Vec::with_capacity(edges.len());
+
+        // Pre-calculate capacity based on edge count (assume ~70% unique records)
+        let estimated_records = (edges.len() * 14) / 10; // 1.4x edges for safety
+        let context = DataContext::with_capacity(estimated_records);
 
         // Efficiently convert all Python keys to Rust edges with optimised bulk processing
         #[cfg(debug_assertions)]
@@ -108,12 +109,12 @@ impl PyCollection {
         #[cfg(debug_assertions)]
         let phase1_start = std::time::Instant::now();
 
-        let mut key_to_id: HashMap<Key, u32> = HashMap::new();
+        use rustc_hash::FxHashMap;
+        let mut key_to_id: FxHashMap<Key, u32> = FxHashMap::default();
         let mut extracted_edges = Vec::with_capacity(edges.len());
 
-        // Pre-allocate estimated capacity based on edge count (assume ~70% unique keys)
-        key_to_id.reserve(edges.len().saturating_mul(7) / 10);
-        context.reserve(edges.len().saturating_mul(7) / 10);
+        // Pre-allocate hash map for key lookups
+        key_to_id.reserve(estimated_records);
 
         for (key1_obj, key2_obj, threshold) in edges {
             // Convert Python objects to Rust Keys (bulk extraction)
@@ -126,33 +127,60 @@ impl PyCollection {
         #[cfg(debug_assertions)]
         let phase1_time = phase1_start.elapsed();
 
-        // Phase 2: Batch key registration with deduplication
+        // Phase 2: Parallel batch key registration with rayon
         #[cfg(debug_assertions)]
         let phase2_start = std::time::Instant::now();
 
-        for (key1, key2, _) in &extracted_edges {
-            if !key_to_id.contains_key(key1) {
-                let id = context.ensure_record(&source_name, key1.clone());
-                key_to_id.insert(key1.clone(), id);
+        use rayon::prelude::*;
+        use std::sync::Mutex;
+
+        // Collect unique keys in parallel
+        let unique_keys: Vec<Key> = {
+            let mut keys_set = FxHashMap::default();
+            for (key1, key2, _) in &extracted_edges {
+                keys_set.entry(key1.clone()).or_insert(());
+                keys_set.entry(key2.clone()).or_insert(());
             }
-            if !key_to_id.contains_key(key2) {
-                let id = context.ensure_record(&source_name, key2.clone());
-                key_to_id.insert(key2.clone(), id);
+            keys_set.into_keys().collect()
+        };
+
+        // Register keys in parallel batches using batch method
+        let batch_size = 5000;
+        let key_to_id_mutex = Mutex::new(key_to_id);
+
+        unique_keys.par_chunks(batch_size).for_each(|batch| {
+            // Call batch registration method
+            let ids = context.ensure_records_batch(&source_name, batch);
+
+            // Build local map
+            let mut local_map = FxHashMap::default();
+            for (key, id) in batch.iter().zip(ids.iter()) {
+                local_map.insert(key.clone(), *id);
             }
-        }
+
+            // Merge local results back
+            let mut global_map = key_to_id_mutex.lock().unwrap();
+            global_map.extend(local_map);
+        });
+
+        let key_to_id = key_to_id_mutex.into_inner().unwrap();
 
         #[cfg(debug_assertions)]
         let phase2_time = phase2_start.elapsed();
 
-        // Phase 3: Build final edge list with ID lookups
+        // Phase 3: Parallel edge ID mapping
         #[cfg(debug_assertions)]
         let phase3_start = std::time::Instant::now();
 
-        for (key1, key2, threshold) in extracted_edges {
-            let id1 = key_to_id[&key1];
-            let id2 = key_to_id[&key2];
-            rust_edges.push((id1, id2, threshold));
-        }
+        // Use parallel iteration to map keys to IDs
+        let rust_edges: Vec<(u32, u32, f64)> = extracted_edges
+            .par_iter()
+            .map(|(key1, key2, threshold)| {
+                let id1 = key_to_id[key1];
+                let id2 = key_to_id[key2];
+                (id1, id2, *threshold)
+            })
+            .collect();
 
         #[cfg(debug_assertions)]
         let phase3_time = phase3_start.elapsed();

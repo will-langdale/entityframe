@@ -22,7 +22,7 @@ def test_user_eda_workflow():
     collection = sl.Collection.from_edges(edges)
     collection_time = time.monotonic() - start_time
 
-    # Test hierarchical behavior: lower thresholds should have fewer or equal entities
+    # Test hierarchical behaviour: lower thresholds should have fewer or equal entities
     # (because more records get merged at lower thresholds)
     test_thresholds = [0.9, 0.7, 0.5]
     prev_entities: float = float("inf")

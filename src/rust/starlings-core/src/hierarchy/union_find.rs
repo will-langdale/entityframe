@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn test_union_find_rank_optimization() {
+    fn test_union_find_rank_optimisation() {
         let mut uf = UnionFind::new(100);
 
         // Test basic union by rank: when trees have different ranks,

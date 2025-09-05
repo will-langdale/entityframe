@@ -1,8 +1,16 @@
 set working-directory := "../.."
 
+# Environment variables
+set export
+STARLINGS_DEBUG := "1"
+
 # Run all tests (Python + Rust)
 default: python rust
     @echo "✅ Ran tests (Python + Rust)."
+
+# List all commands
+list:
+    just -f ./src/tests/justfile --list
 
 # Run Python tests
 python:
@@ -13,8 +21,3 @@ python:
 rust:
     @echo "Running Rust core tests..."
     cargo test -p starlings-core
-
-# Internal benchmark runner
-_bench:
-    @echo "Running Rust core benchmarks..."
-    STARLINGS_DEBUG=1 cargo bench -p starlings-core

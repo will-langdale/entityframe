@@ -1,90 +1,98 @@
 use crate::core::key::Key;
 use crate::core::record::InternedRecord;
+use boxcar::Vec as BoxcarVec;
 use dashmap::DashMap;
+use lasso::{Capacity, Key as LassoKey, ThreadedRodeo};
 use roaring::RoaringBitmap;
+use rustc_hash::FxHasher;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::RwLock;
-use string_interner::{DefaultBackend, DefaultSymbol, StringInterner, Symbol};
+use std::sync::Arc;
+
+type FxDashMap<K, V> = DashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 #[derive(Debug)]
 pub struct DataContext {
-    pub records: RwLock<Vec<InternedRecord>>,
-    pub source_interner: RwLock<StringInterner<DefaultBackend>>,
-    pub identity_map: DashMap<InternedRecord, u32>,
-    pub source_index: DashMap<u32, RoaringBitmap>,
+    pub records: BoxcarVec<InternedRecord>,
+    pub source_interner: Arc<ThreadedRodeo>,
+    pub identity_map: FxDashMap<InternedRecord, u32>,
+    pub source_index: FxDashMap<u32, RoaringBitmap>,
     next_record_id: AtomicU32,
 }
 
 impl DataContext {
     pub fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    /// Create DataContext with pre-allocated capacity for better performance
+    pub fn with_capacity(estimated_records: usize) -> Self {
+        let hasher = BuildHasherDefault::<FxHasher>::default();
+
         DataContext {
-            records: RwLock::new(Vec::new()),
-            source_interner: RwLock::new(StringInterner::new()),
-            identity_map: DashMap::new(),
-            source_index: DashMap::new(),
+            records: BoxcarVec::new(),
+            source_interner: Arc::new(ThreadedRodeo::with_capacity(Capacity::for_strings(
+                estimated_records.min(10000),
+            ))),
+            identity_map: DashMap::with_capacity_and_hasher(estimated_records, hasher.clone()),
+            source_index: DashMap::with_hasher(hasher),
             next_record_id: AtomicU32::new(0),
         }
     }
 
-    /// Thread-safe record interning with lock-free fast path
-    pub fn ensure_record(&self, source: &str, key: Key) -> u32 {
-        // Get or intern source string (requires write lock, but infrequent)
-        let source_id = {
-            // Try read-only access first for existing sources
-            if let Ok(interner) = self.source_interner.try_read() {
-                if let Some(symbol) = interner.get(source) {
-                    symbol.to_usize() as u32
-                } else {
-                    drop(interner);
-                    // Need to intern new source
-                    self.source_interner
-                        .write()
-                        .unwrap()
-                        .get_or_intern(source)
-                        .to_usize() as u32
+    /// Batch ensure records for improved performance
+    pub fn ensure_records_batch(&self, source: &str, keys: &[Key]) -> Vec<u32> {
+        let source_id = LassoKey::into_usize(self.source_interner.get_or_intern(source)) as u32;
+
+        keys.iter()
+            .map(|key| {
+                let record = InternedRecord::new(source_id, key.clone());
+
+                if let Some(existing_id) = self.identity_map.get(&record) {
+                    return *existing_id;
                 }
-            } else {
-                // Fallback to write lock
-                self.source_interner
-                    .write()
-                    .unwrap()
-                    .get_or_intern(source)
-                    .to_usize() as u32
-            }
-        };
+
+                let record_id = self.next_record_id.fetch_add(1, Ordering::Relaxed);
+
+                match self.identity_map.entry(record.clone()) {
+                    dashmap::mapref::entry::Entry::Occupied(entry) => *entry.get(),
+                    dashmap::mapref::entry::Entry::Vacant(entry) => {
+                        entry.insert(record_id);
+
+                        self.records.push(record);
+
+                        self.source_index
+                            .entry(source_id)
+                            .or_default()
+                            .insert(record_id);
+
+                        record_id
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Thread-safe record interning with lock-free operations
+    pub fn ensure_record(&self, source: &str, key: Key) -> u32 {
+        let source_id = LassoKey::into_usize(self.source_interner.get_or_intern(source)) as u32;
 
         let record = InternedRecord::new(source_id, key);
 
-        // Lock-free fast path: check if record already exists
         if let Some(existing_id) = self.identity_map.get(&record) {
             return *existing_id;
         }
 
-        // Need to create new record - use atomic counter for ID
         let record_id = self.next_record_id.fetch_add(1, Ordering::Relaxed);
 
-        // Try to insert the mapping
         match self.identity_map.entry(record.clone()) {
-            dashmap::mapref::entry::Entry::Occupied(entry) => {
-                // Someone else inserted it first - return their ID
-                *entry.get()
-            }
+            dashmap::mapref::entry::Entry::Occupied(entry) => *entry.get(),
             dashmap::mapref::entry::Entry::Vacant(entry) => {
-                // We won the race - insert our record
                 entry.insert(record_id);
 
-                // Add to records vector (requires write lock)
-                {
-                    let mut records = self.records.write().unwrap();
-                    // Ensure vector is large enough
-                    while records.len() <= record_id as usize {
-                        records.push(InternedRecord::new(0, Key::U32(0))); // placeholder
-                    }
-                    records[record_id as usize] = record;
-                }
+                self.records.push(record);
 
-                // Update source index (lock-free)
                 self.source_index
                     .entry(source_id)
                     .or_default()
@@ -102,28 +110,21 @@ impl DataContext {
         key: Key,
         attributes: HashMap<String, String>,
     ) -> u32 {
-        // Get or intern source and attribute strings
-        let (source_id, interned_attrs) = {
-            let mut interner = self.source_interner.write().unwrap();
-            let source_id = interner.get_or_intern(source).to_usize() as u32;
+        let source_id = LassoKey::into_usize(self.source_interner.get_or_intern(source)) as u32;
 
-            let mut interned_attrs = HashMap::new();
-            for (k, v) in attributes {
-                let key_id = interner.get_or_intern(k).to_usize() as u32;
-                let val_id = interner.get_or_intern(v).to_usize() as u32;
-                interned_attrs.insert(key_id, val_id);
-            }
-            (source_id, interned_attrs)
-        };
+        let mut interned_attrs = HashMap::new();
+        for (k, v) in attributes {
+            let key_id = LassoKey::into_usize(self.source_interner.get_or_intern(k)) as u32;
+            let val_id = LassoKey::into_usize(self.source_interner.get_or_intern(v)) as u32;
+            interned_attrs.insert(key_id, val_id);
+        }
 
         let record = InternedRecord::with_attributes(source_id, key, interned_attrs);
 
-        // Lock-free fast path: check if record already exists
         if let Some(existing_id) = self.identity_map.get(&record) {
             return *existing_id;
         }
 
-        // Need to create new record
         let record_id = self.next_record_id.fetch_add(1, Ordering::Relaxed);
 
         match self.identity_map.entry(record.clone()) {
@@ -131,16 +132,8 @@ impl DataContext {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 entry.insert(record_id);
 
-                // Add to records vector
-                {
-                    let mut records = self.records.write().unwrap();
-                    while records.len() <= record_id as usize {
-                        records.push(InternedRecord::new(0, Key::U32(0)));
-                    }
-                    records[record_id as usize] = record;
-                }
+                self.records.push(record);
 
-                // Update source index
                 self.source_index
                     .entry(source_id)
                     .or_default()
@@ -152,8 +145,7 @@ impl DataContext {
     }
 
     pub fn get_record(&self, id: u32) -> Option<InternedRecord> {
-        let records = self.records.read().unwrap();
-        records.get(id as usize).cloned()
+        self.records.get(id as usize).map(|r| (*r).clone())
     }
 
     pub fn len(&self) -> usize {
@@ -165,25 +157,21 @@ impl DataContext {
     }
 
     pub fn get_source_name(&self, source_id: u32) -> Option<String> {
-        let interner = self.source_interner.read().unwrap();
-        let symbol = DefaultSymbol::try_from_usize(source_id as usize)?;
-        interner.resolve(symbol).map(|s| s.to_string())
+        let spur = LassoKey::try_from_usize(source_id as usize)?;
+        self.source_interner
+            .try_resolve(&spur)
+            .map(|s| s.to_string())
     }
 
     pub fn get_records_by_source(&self, source_name: &str) -> Option<Vec<u32>> {
-        let interner = self.source_interner.read().unwrap();
-        let symbol = interner.get(source_name)?;
-        let source_id = symbol.to_usize() as u32;
+        let source_id = LassoKey::into_usize(self.source_interner.get(source_name)?) as u32;
         self.source_index
             .get(&source_id)
             .map(|bitmap| bitmap.iter().collect())
     }
 
     /// Reserve space for the expected number of records (for performance)
-    pub fn reserve(&self, additional: usize) {
-        let mut records = self.records.write().unwrap();
-        records.reserve(additional);
-    }
+    pub fn reserve(&self, _additional: usize) {}
 }
 
 impl Default for DataContext {

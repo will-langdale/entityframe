@@ -315,7 +315,7 @@ fn main() {
 
     println!("\n=== DIAGNOSIS SUMMARY ===");
     println!("Key findings:");
-    println!("1. Hierarchical patterns are 1.8x FASTER than random (optimization works!)");
+    println!("1. Hierarchical patterns are 1.8x FASTER than random (optimisation works!)");
     println!("2. If E2E direct Rust test is fast, the bottleneck is Python->Rust conversion");
     println!("3. If E2E direct Rust test is slow, there may be a scale-dependent issue");
 }
