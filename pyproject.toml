@@ -4,7 +4,9 @@ dynamic = ["version"]
 description = "A Python package for comparing entity resolutions from different processes"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "numpy>=2.2.6",
+]
 license = {file = "LICENSE"}
 authors = [
     {name = "Will Langdale"}
@@ -44,6 +46,7 @@ dev = [
     "mkdocs-material>=9.6.18",
     "mkdocstrings[python]>=0.30.0",
     "mypy>=1.16.0",
+    "psutil>=7.0.0",
     "pytest>=8.4.0",
     "ruff>=0.11.13",
 ]
@@ -61,7 +64,13 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "benchmark: marks tests as benchmarks (deselect with '-m \"not benchmark\"')",
 ]
+addopts = "-m 'not benchmark'"
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(asctime)s [%(levelname)8s] %(name)s: %(message)s"
+log_cli_date_format = "%Y-%m-%d %H:%M:%S"
 
 [tool.uv]
 # Prevent uv sync from building the package - use just build instead
@@ -88,7 +97,8 @@ select = [
     "TID",
     "BLE",
     "PLC",
-    "SIM"
+    "SIM",
+    "T20",
 ]
 ignore = []
 fixable = ["ALL"]

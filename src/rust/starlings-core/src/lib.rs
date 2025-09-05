@@ -1,9 +1,11 @@
 pub mod core;
 pub mod hierarchy;
+pub mod test_utils;
 
 // Re-export commonly used types for easier access
 pub use core::{DataContext, Key};
 pub use hierarchy::{MergeEvent, PartitionHierarchy, PartitionLevel};
+pub use test_utils::{GraphConfig, GraphData, ThresholdConfig};
 
 #[cfg(test)]
 mod tests {
@@ -11,7 +13,7 @@ mod tests {
 
     #[test]
     fn test_basic_functionality() {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
 
         let id1 = ctx.ensure_record("test", Key::String("hello".to_string()));
         let id2 = ctx.ensure_record("test", Key::String("world".to_string()));

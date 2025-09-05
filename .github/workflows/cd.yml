@@ -64,8 +64,8 @@ jobs:
     - name: Install dependencies
       run: just install
     
-    - name: Build project
-      run: just build
+    - name: Build project with PGO
+      run: just build pgo
     
     - name: Install cibuildwheel
       run: uv tool install cibuildwheel
@@ -115,8 +115,8 @@ jobs:
     - name: Install dependencies
       run: just install
     
-    - name: Build project
-      run: just build
+    - name: Build project with PGO
+      run: just build pgo
     
     - name: Install maturin
       run: uv tool install maturin
@@ -149,8 +149,8 @@ jobs:
       - name: Install dependencies
         run: just install
       
-      - name: Build project
-        run: just build
+      - name: Build project with PGO
+        run: just build pgo
       
       - name: Build with MkDocs
         run: uv run mkdocs build

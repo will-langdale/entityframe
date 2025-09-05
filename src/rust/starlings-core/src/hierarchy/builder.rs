@@ -1,35 +1,23 @@
-use disjoint_sets::UnionFind;
 use lru::LruCache;
 use roaring::RoaringBitmap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use super::bitmap_pool::BitmapPool;
 use super::merge_event::MergeEvent;
 use super::partition::PartitionLevel;
+use super::union_find::UnionFind;
 use crate::core::DataContext;
 
-/// Represents a hierarchy of merge events that can generate partitions at any threshold
-///
-/// The hierarchy is built from edges using a union-find algorithm and stores merge events
-/// in descending threshold order. It maintains an LRU cache for frequently accessed
-/// partitions and supports fixed-point threshold conversion for exact comparisons.
+/// Hierarchy of merge events that can generate partitions at any threshold
 #[derive(Debug, Clone)]
 pub struct PartitionHierarchy {
-    /// Reference to the data context that gives meaning to record indices
     context: Arc<DataContext>,
-
-    /// Primary: Merge events sorted by threshold (descending)
     merges: Vec<MergeEvent>,
-
-    /// Secondary: Cache for frequently accessed partitions
-    /// Using u32 keys (threshold * 1_000_000) for exact comparison
     partition_cache: LruCache<u32, PartitionLevel>,
-
-    /// Index for binary search on thresholds (using integer keys)
     #[allow(dead_code)]
     threshold_index: BTreeMap<u32, usize>,
-
-    /// Configuration
+    bitmap_pool: BitmapPool,
     #[allow(dead_code)]
     cache_size: usize,
 }
@@ -52,17 +40,6 @@ impl PartitionHierarchy {
     }
 
     /// Build a hierarchy from edges using union-find algorithm
-    ///
-    /// # Arguments
-    /// * `edges` - Vector of (src, dst, weight) tuples with u32 record indices
-    /// * `context` - Shared data context that gives meaning to record indices
-    /// * `quantise` - Number of decimal places to quantise thresholds (1-6)
-    ///
-    /// # Returns
-    /// A new PartitionHierarchy with merge events sorted by threshold (descending)
-    ///
-    /// # Complexity
-    /// O(m log m) where m = number of edges (dominated by sorting)
     pub fn from_edges(
         edges: Vec<(u32, u32, f64)>,
         context: Arc<DataContext>,
@@ -81,38 +58,93 @@ impl PartitionHierarchy {
                 merges: Vec::new(),
                 partition_cache: LruCache::new(Self::CACHE_SIZE.try_into().unwrap()),
                 threshold_index: BTreeMap::new(),
+                bitmap_pool: BitmapPool::new(),
                 cache_size: Self::CACHE_SIZE,
             };
         }
 
         let num_records = context.len();
 
+        // Store edge count for pool scaling before consuming edges
+        let num_edges = edges.len();
+
         // Apply quantisation to weights
+        #[cfg(debug_assertions)]
+        let quantise_start = std::time::Instant::now();
+
         let factor = 10_f64.powi(quantise as i32);
-        let mut sorted_edges: Vec<_> = edges
+        let mut quantised_edges: Vec<_> = edges
             .into_iter()
             .map(|(i, j, w)| (i, j, (w * factor).round() / factor))
             .collect();
 
-        // Sort edges by weight (descending) - O(m log m)
-        sorted_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        #[cfg(debug_assertions)]
+        let quantise_time = quantise_start.elapsed();
 
-        // Group edges by threshold (handles quantisation naturally)
-        let threshold_groups = Self::group_edges_by_threshold(sorted_edges);
+        // Sort edges by threshold (highest first)
+        #[cfg(debug_assertions)]
+        let sort_start = std::time::Instant::now();
 
-        // Build merge events using union-find
-        let merges = Self::build_merge_events(threshold_groups, num_records);
+        quantised_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        #[cfg(debug_assertions)]
+        let sort_time = sort_start.elapsed();
+
+        // Create a temporary instance with scaled bitmap pool for construction
+        let mut temp_hierarchy = Self {
+            context: context.clone(),
+            merges: Vec::new(),
+            partition_cache: LruCache::new(Self::CACHE_SIZE.try_into().unwrap()),
+            threshold_index: BTreeMap::new(),
+            bitmap_pool: BitmapPool::new_for_scale(num_edges),
+            cache_size: Self::CACHE_SIZE,
+        };
+
+        // Group edges by threshold and build merge events
+        #[cfg(debug_assertions)]
+        let group_start = std::time::Instant::now();
+
+        let threshold_groups = Self::group_edges_by_threshold(quantised_edges);
+
+        #[cfg(debug_assertions)]
+        let group_time = group_start.elapsed();
+
+        #[cfg(debug_assertions)]
+        let union_find_start = std::time::Instant::now();
+
+        let merges = temp_hierarchy.build_merge_events(threshold_groups, num_records);
+
+        #[cfg(debug_assertions)]
+        let union_find_time = union_find_start.elapsed();
 
         // Build threshold index for fast lookup
         let threshold_index = Self::build_threshold_index(&merges);
 
-        Self {
+        // Reuse the bitmap pool from temporary instance for efficiency
+        let result = Self {
             context,
             merges,
             partition_cache: LruCache::new(Self::CACHE_SIZE.try_into().unwrap()),
             threshold_index,
+            bitmap_pool: temp_hierarchy.bitmap_pool,
             cache_size: Self::CACHE_SIZE,
+        };
+
+        // Debug output for hierarchy construction breakdown
+        #[cfg(debug_assertions)]
+        if num_edges >= 100_000 {
+            eprintln!("   🔧 Hierarchy construction breakdown:");
+            eprintln!("      Quantisation: {:?}", quantise_time);
+            eprintln!("      Sorting {} edges: {:?}", num_edges, sort_time);
+            eprintln!("      Edge grouping: {:?}", group_time);
+            eprintln!("      Union-find & merges: {:?}", union_find_time);
+            eprintln!(
+                "      Total hierarchy: {:?}",
+                quantise_time + sort_time + group_time + union_find_time
+            );
         }
+
+        result
     }
 
     /// Group consecutive edges with the same threshold
@@ -144,73 +176,99 @@ impl PartitionHierarchy {
 
     /// Build merge events from grouped edges using union-find
     fn build_merge_events(
+        &mut self,
         threshold_groups: Vec<(f64, Vec<(u32, u32)>)>,
         num_records: usize,
     ) -> Vec<MergeEvent> {
         let mut merges = Vec::new();
         let mut uf = UnionFind::new(num_records);
+        let mut active_components: HashMap<usize, RoaringBitmap> = HashMap::new();
 
-        for (threshold, edges_at_threshold) in threshold_groups {
-            // Track components before applying merges
-            let mut components_before: HashMap<usize, RoaringBitmap> = HashMap::new();
+        #[cfg(debug_assertions)]
+        let mut merge_count = 0;
+        #[cfg(debug_assertions)]
+        let mut bitmap_allocations = 0;
 
-            // First pass: collect all current components that will be affected
-            let mut affected_records = HashSet::new();
-            for &(src, dst) in &edges_at_threshold {
-                affected_records.insert(src);
-                affected_records.insert(dst);
-            }
+        for (threshold, edges_at_threshold) in threshold_groups.iter() {
+            let mut processed_pairs = HashSet::new();
 
-            // Build components before merging
-            for &record in &affected_records {
-                let root = uf.find(record as usize);
-                components_before.entry(root).or_insert_with(|| {
-                    let mut component = RoaringBitmap::new();
-                    for i in 0..num_records {
-                        if uf.find(i) == root {
-                            component.insert(i as u32);
-                        }
-                    }
-                    component
-                });
-            }
-
-            // Apply merges to union-find
-            let mut merged_roots = HashSet::new();
-            for &(src, dst) in &edges_at_threshold {
+            for &(src, dst) in edges_at_threshold {
                 let root_src = uf.find(src as usize);
                 let root_dst = uf.find(dst as usize);
 
                 if root_src != root_dst {
-                    merged_roots.insert(root_src);
-                    merged_roots.insert(root_dst);
-                    uf.union(src as usize, dst as usize);
+                    let pair = if root_src < root_dst {
+                        (root_src, root_dst)
+                    } else {
+                        (root_dst, root_src)
+                    };
+
+                    if !processed_pairs.contains(&pair) {
+                        processed_pairs.insert(pair);
+
+                        let mut merging_components = Vec::new();
+
+                        if let Some(component_src) = active_components.remove(&root_src) {
+                            merging_components.push(component_src);
+                        } else {
+                            let (mut bitmap, _) = self.bitmap_pool.get(1);
+                            bitmap.insert(src);
+                            merging_components.push(bitmap);
+                            #[cfg(debug_assertions)]
+                            {
+                                bitmap_allocations += 1;
+                            }
+                        }
+
+                        if let Some(component_dst) = active_components.remove(&root_dst) {
+                            merging_components.push(component_dst);
+                        } else {
+                            let (mut bitmap, _) = self.bitmap_pool.get(1);
+                            bitmap.insert(dst);
+                            merging_components.push(bitmap);
+                            #[cfg(debug_assertions)]
+                            {
+                                bitmap_allocations += 1;
+                            }
+                        }
+
+                        uf.union(src as usize, dst as usize);
+                        let new_root = uf.find(src as usize);
+
+                        if merging_components.len() > 1 {
+                            let (mut merged_component, _) =
+                                self.bitmap_pool
+                                    .get(merging_components.iter().map(|b| b.len()).sum::<u64>()
+                                        as u32);
+                            for old_component in &merging_components {
+                                merged_component |= old_component;
+                            }
+
+                            merges.push(MergeEvent::new(*threshold, merging_components));
+                            active_components.insert(new_root, merged_component);
+                            #[cfg(debug_assertions)]
+                            {
+                                merge_count += 1;
+                            }
+                        }
+                    }
                 }
             }
+        }
 
-            // Create merge events for components that were merged
-            if merged_roots.len() > 1 {
-                // Group components by their new root after merging
-                let mut merge_groups: HashMap<usize, Vec<RoaringBitmap>> = HashMap::new();
+        for (_, bitmap) in active_components {
+            self.bitmap_pool
+                .put(bitmap, super::bitmap_pool::PoolSizeClass::Small);
+        }
 
-                for old_root in merged_roots {
-                    if let Some(component) = components_before.get(&old_root) {
-                        // Find what this component's new root is
-                        let first_record = component.iter().next().unwrap() as usize;
-                        let new_root = uf.find(first_record);
-                        merge_groups
-                            .entry(new_root)
-                            .or_default()
-                            .push(component.clone());
-                    }
-                }
-
-                // Create a merge event for each group of components that merged
-                for groups in merge_groups.values() {
-                    if groups.len() > 1 {
-                        merges.push(MergeEvent::new(threshold, groups.clone()));
-                    }
-                }
+        #[cfg(debug_assertions)]
+        {
+            let total_edges: usize = threshold_groups.iter().map(|(_, edges)| edges.len()).sum();
+            if total_edges >= 100_000 {
+                eprintln!(
+                    "      Union-find stats: {} merges, {} bitmap allocations",
+                    merge_count, bitmap_allocations
+                );
             }
         }
 
@@ -237,19 +295,6 @@ impl PartitionHierarchy {
     }
 
     /// Get a partition at a specific threshold
-    ///
-    /// Returns a reference to the partition at the given threshold. Partitions are cached
-    /// using an LRU cache for efficient repeated access. The first access to a threshold
-    /// requires O(m) reconstruction, but subsequent accesses are O(1) from cache.
-    ///
-    /// # Arguments
-    /// * `threshold` - The threshold value between 0.0 and 1.0
-    ///
-    /// # Returns
-    /// A reference to the PartitionLevel at the specified threshold
-    ///
-    /// # Panics
-    /// Panics if threshold is not between 0.0 and 1.0
     pub fn at_threshold(&mut self, threshold: f64) -> &PartitionLevel {
         // Validate threshold
         assert!(
@@ -274,12 +319,6 @@ impl PartitionHierarchy {
     }
 
     /// Reconstruct a partition at a specific threshold
-    ///
-    /// This method rebuilds the partition from scratch by applying all merge events
-    /// with threshold >= the requested threshold.
-    ///
-    /// # Complexity
-    /// O(m + n) where m = number of merge events and n = number of records
     fn reconstruct_at_threshold(&self, threshold: f64) -> PartitionLevel {
         let num_records = self.context.len();
 
@@ -315,9 +354,15 @@ impl PartitionHierarchy {
         // Include ALL records from the context (handles isolates)
         for record_idx in 0..num_records {
             let root = uf.find(record_idx);
+            entities_map.entry(root).or_insert_with(|| {
+                // Estimate entity size for pool selection - use small size as default
+                let estimated_size = (num_records / 100).max(10) as u32; // Reasonable default
+                let (bitmap, _) = self.bitmap_pool.get(estimated_size);
+                bitmap
+            });
             entities_map
-                .entry(root)
-                .or_default()
+                .get_mut(&root)
+                .unwrap()
                 .insert(record_idx as u32);
         }
 
@@ -334,7 +379,7 @@ mod tests {
     use crate::core::{DataContext, Key};
 
     fn create_test_context() -> Arc<DataContext> {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
         ctx.ensure_record("test", Key::String("A".to_string()));
         ctx.ensure_record("test", Key::String("B".to_string()));
         ctx.ensure_record("test", Key::String("C".to_string()));
@@ -377,7 +422,7 @@ mod tests {
 
     #[test]
     fn test_disconnected_components() {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
         // Create 4 records: A, B, C, D
         ctx.ensure_record("test", Key::String("A".to_string()));
         ctx.ensure_record("test", Key::String("B".to_string()));
@@ -408,7 +453,7 @@ mod tests {
 
     #[test]
     fn test_same_threshold_edges_nway_merge() {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
         // Create 4 records: A, B, C, D
         ctx.ensure_record("test", Key::String("A".to_string()));
         ctx.ensure_record("test", Key::String("B".to_string()));
@@ -553,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_isolates_as_singletons() {
-        let mut ctx = DataContext::new();
+        let ctx = DataContext::new();
 
         // Create 5 records
         for i in 0..5 {
@@ -635,5 +680,149 @@ mod tests {
 
         // Should panic with threshold > 1.0
         hierarchy.at_threshold(1.1);
+    }
+
+    #[test]
+    fn test_separate_components_same_threshold() {
+        // This test specifically addresses the "single giant component" bug
+        let ctx = DataContext::new();
+        // Create 6 records: A, B, C, D, E, F
+        for i in 0..6 {
+            ctx.ensure_record("test", Key::String(format!("{}", (b'A' + i) as char)));
+        }
+        let ctx = Arc::new(ctx);
+
+        // Create three separate pairs at the same threshold
+        let edges = vec![
+            (0, 1, 0.9), // A-B
+            (2, 3, 0.9), // C-D
+            (4, 5, 0.9), // E-F
+        ];
+
+        let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
+
+        // At threshold 0.9, should have 3 components (3 pairs)
+        let partition = hierarchy.at_threshold(0.9);
+        let num_entities_09 = partition.entities().len();
+        assert_eq!(
+            num_entities_09, 3,
+            "Should have exactly 3 components at threshold 0.9"
+        );
+
+        // Verify each component has exactly 2 members
+        for entity in partition.entities() {
+            assert_eq!(
+                entity.len(),
+                2,
+                "Each component should have exactly 2 members"
+            );
+        }
+
+        // At threshold 1.0, should have 6 singletons
+        let partition_high = hierarchy.at_threshold(1.0);
+        assert_eq!(
+            partition_high.entities().len(),
+            6,
+            "Should have 6 singletons at threshold 1.0"
+        );
+    }
+
+    #[test]
+    fn test_hierarchical_component_formation() {
+        let ctx = DataContext::new();
+        // Create 8 records for complex hierarchy
+        for i in 0..8 {
+            ctx.ensure_record("test", Key::String(format!("record_{}", i)));
+        }
+        let ctx = Arc::new(ctx);
+
+        // Hierarchical structure:
+        // Threshold 0.9: (0,1), (2,3) -> 2 pairs + 4 singletons = 6 entities
+        // Threshold 0.8: (4,5) -> 3 pairs + 2 singletons = 5 entities
+        // Threshold 0.7: (6,7) -> 4 pairs = 4 entities
+        let edges = vec![
+            (0, 1, 0.9), // Pair 1
+            (2, 3, 0.9), // Pair 2
+            (4, 5, 0.8), // Pair 3 (lower threshold)
+            (6, 7, 0.7), // Pair 4 (lowest threshold)
+        ];
+
+        let mut hierarchy = PartitionHierarchy::from_edges(edges, ctx, 2);
+
+        // Test hierarchical behaviour
+        let partition_high = hierarchy.at_threshold(0.95);
+        assert_eq!(
+            partition_high.entities().len(),
+            8,
+            "Above all thresholds: 8 singletons"
+        );
+
+        let partition_09 = hierarchy.at_threshold(0.9);
+        assert_eq!(
+            partition_09.entities().len(),
+            6,
+            "At 0.9: 2 pairs + 4 singletons = 6 entities"
+        );
+
+        let partition_08 = hierarchy.at_threshold(0.8);
+        assert_eq!(
+            partition_08.entities().len(),
+            5,
+            "At 0.8: 3 pairs + 2 singletons = 5 entities"
+        );
+
+        let partition_07 = hierarchy.at_threshold(0.7);
+        assert_eq!(
+            partition_07.entities().len(),
+            4,
+            "At 0.7: 4 pairs = 4 entities"
+        );
+
+        let partition_low = hierarchy.at_threshold(0.5);
+        assert_eq!(
+            partition_low.entities().len(),
+            4,
+            "Below all thresholds: same as 0.7"
+        );
+    }
+
+    #[test]
+    fn test_quantisation_preserves_components() {
+        let ctx = DataContext::new();
+        // Create 4 records
+        for i in 0..4 {
+            ctx.ensure_record("test", Key::String(format!("record_{}", i)));
+        }
+        let ctx = Arc::new(ctx);
+
+        // Test different quantisation levels preserve component structure
+        let edges = vec![
+            (0, 1, 0.85432), // Should quantise to 0.85
+            (2, 3, 0.75678), // Should quantise to 0.76
+        ];
+
+        // Test with quantise=2 (2 decimal places)
+        let mut hierarchy = PartitionHierarchy::from_edges(edges.clone(), ctx.clone(), 2);
+
+        let partition_high = hierarchy.at_threshold(0.9);
+        assert_eq!(
+            partition_high.entities().len(),
+            4,
+            "Above quantised thresholds: 4 singletons"
+        );
+
+        let partition_mid = hierarchy.at_threshold(0.8);
+        assert_eq!(
+            partition_mid.entities().len(),
+            3,
+            "Between quantised thresholds: 1 pair + 2 singletons"
+        );
+
+        let partition_low = hierarchy.at_threshold(0.7);
+        assert_eq!(
+            partition_low.entities().len(),
+            2,
+            "Below quantised thresholds: 2 pairs"
+        );
     }
 }
